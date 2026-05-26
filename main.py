@@ -51,7 +51,12 @@ def main() -> None:
         print(_TOKEN_HELP, file=sys.stderr)
         sys.exit(1)
 
+    from config import DB_PATH
+    from database import ensure_db_directory
+
+    ensure_db_directory()
     init_db()
+    logger.info("Database path: %s", DB_PATH)
 
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_error_handler(on_error)

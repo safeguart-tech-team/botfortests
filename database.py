@@ -11,9 +11,14 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def ensure_db_directory() -> None:
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+
 @contextmanager
 def get_conn():
-    conn = sqlite3.connect(DB_PATH)
+    ensure_db_directory()
+    conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     try:
         yield conn

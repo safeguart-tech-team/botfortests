@@ -38,7 +38,22 @@ def _load_token() -> str:
 
 
 BOT_TOKEN = _load_token()
-DB_PATH = Path(os.getenv("DATABASE_PATH", str(_base / "testbot.db")))
+
+
+def _resolve_db_path() -> Path:
+    explicit = os.getenv("DATABASE_PATH", "").strip()
+    if explicit:
+        return Path(explicit)
+
+    # Railway автоматически задаёт путь смонтированного тома
+    volume_mount = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
+    if volume_mount:
+        return Path(volume_mount) / "testbot.db"
+
+    return _base / "testbot.db"
+
+
+DB_PATH = _resolve_db_path()
 
 TIME_OPTIONS = {
     "none": None,

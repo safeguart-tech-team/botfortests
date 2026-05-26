@@ -26,8 +26,8 @@ python main.py
 1. Создайте проект на Railway и подключите репозиторий [botfortests](https://github.com/safeguart-tech-team/botfortests).
 2. В **Variables** добавьте:
    - `BOT_TOKEN` — токен бота от BotFather
-   - `DATABASE_PATH` — `/data/testbot.db` (рекомендуется при использовании Volume)
-3. В **Volumes** смонтируйте том в `/data`, чтобы база данных сохранялась при перезапуске.
+   - `DATABASE_PATH` — `/data/testbot.db` (если том смонтирован в `/data`)
+3. В **Volumes** смонтируйте том в `/data`. Если `DATABASE_PATH` не задан, бот сам использует том через `RAILWAY_VOLUME_MOUNT_PATH`.
 4. Railway автоматически запустит `python main.py` (см. `railway.toml` и `Procfile`).
 
 > **Важно:** не запускайте бота одновременно локально и на Railway — будет конфликт polling.

@@ -6,7 +6,7 @@ from telegram.ext import Application
 
 from config import BOT_TOKEN, is_valid_bot_token
 from database import finish_test, get_active_tests_past_deadline, get_participants_ranked, init_db
-from handlers.creator import build_creator_handler
+from handlers.creator import build_creator_handlers
 from handlers.results_cmd import build_results_handlers
 from handlers.taker import build_taker_handlers
 from utils import format_results
@@ -63,7 +63,8 @@ def main() -> None:
 
     for handler in build_results_handlers():
         app.add_handler(handler)
-    app.add_handler(build_creator_handler())
+    for handler in build_creator_handlers():
+        app.add_handler(handler)
     for handler in build_taker_handlers():
         app.add_handler(handler)
 

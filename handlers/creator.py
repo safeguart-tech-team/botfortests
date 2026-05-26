@@ -1,30 +1,19 @@
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
+    ApplicationHandlerStop,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
-    ConversationHandler,
     MessageHandler,
     filters,
 )
 
 import database as db
 from config import RESULTS_DELAY_OPTIONS, TIME_OPTIONS
+from handlers.results_cmd import finish_test_and_send_results
 from handlers.taker import start_test_from_link
 from locales import t
-from handlers.results_cmd import finish_test_and_send_results
 from utils import test_deep_link
-
-(
-    LANG,
-    TEST_NAME,
-    QUESTION_COUNT,
-    TIME_PER_Q,
-    QUESTION_TEXT,
-    QUESTION_OPTIONS,
-    CORRECT_ANSWER,
-    RESULTS_DELAY,
-) = range(8)
 
 
 def _lang_keyboard() -> InlineKeyboardMarkup:
@@ -72,214 +61,215 @@ def _delay_keyboard(lang: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-async def start_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+def _lang(context: ContextTypes.DEFAULT_TYPE) -> str:
+    return context.user_data.get("lang", "ru")
+
+
+def _clear_create(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.clear()
+
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if context.args and context.args[0].startswith("test_"):
         await start_test_from_link(update, context)
-        return ConversationHandler.END
+        return
 
+    _clear_create(context)
+    context.user_data["create_step"] = "lang"
     await update.effective_message.reply_text(
         t("ru", "choose_lang"),
         reply_markup=_lang_keyboard(),
     )
-    return LANG
 
 
-async def start_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    return await start_entry(update, context)
+async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    lang = context.user_data.get("lang") or db.get_user_lang(update.effective_user.id)
+    _clear_create(context)
+    await update.message.reply_text(t(lang, "cancelled"))
 
 
-async def choose_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def on_create_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()
-    lang = "ru" if query.data == "lang_ru" else "uz"
-    user_id = update.effective_user.id
-    db.set_user_lang(user_id, lang)
-    context.user_data.clear()
-    context.user_data["lang"] = lang
+    step = context.user_data.get("create_step")
+    if not step:
+        return
 
-    await query.edit_message_text(t(lang, "enter_test_name"))
-    return TEST_NAME
+    data = query.data
 
+    if data.startswith("lang_"):
+        if step != "lang":
+            return
+        await query.answer()
+        lang = "ru" if data == "lang_ru" else "uz"
+        db.set_user_lang(update.effective_user.id, lang)
+        context.user_data["lang"] = lang
+        context.user_data["create_step"] = "test_name"
+        await query.message.reply_text(t(lang, "enter_test_name"))
+        return
 
-async def receive_test_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    lang = context.user_data["lang"]
-    name = update.message.text.strip()
-    if not name:
-        await update.message.reply_text(t(lang, "enter_test_name"))
-        return TEST_NAME
-    context.user_data["test_name"] = name
-    await update.message.reply_text(t(lang, "enter_question_count"))
-    return QUESTION_COUNT
+    if data.startswith("time_"):
+        if step != "time":
+            return
+        await query.answer()
+        lang = _lang(context)
+        key = data.replace("time_", "")
+        context.user_data["time_per_question"] = TIME_OPTIONS[key]
 
+        test_id = db.create_test(
+            creator_id=update.effective_user.id,
+            name=context.user_data["test_name"],
+            lang=lang,
+            question_count=context.user_data["question_count"],
+            time_per_question=context.user_data["time_per_question"],
+        )
+        context.user_data["test_id"] = test_id
+        context.user_data["create_step"] = "question_text"
 
-async def receive_question_count(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    lang = context.user_data["lang"]
-    try:
-        count = int(update.message.text.strip())
-        if count < 1:
-            raise ValueError
-    except ValueError:
-        await update.message.reply_text(t(lang, "invalid_number"))
-        return QUESTION_COUNT
-
-    context.user_data["question_count"] = count
-    context.user_data["current_q"] = 1
-
-    await update.message.reply_text(
-        t(lang, "choose_time"),
-        reply_markup=_time_keyboard(lang),
-    )
-    return TIME_PER_Q
-
-
-async def choose_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    lang = context.user_data["lang"]
-    key = query.data.replace("time_", "")
-    context.user_data["time_per_question"] = TIME_OPTIONS[key]
-
-    test_id = db.create_test(
-        creator_id=update.effective_user.id,
-        name=context.user_data["test_name"],
-        lang=lang,
-        question_count=context.user_data["question_count"],
-        time_per_question=context.user_data["time_per_question"],
-    )
-    context.user_data["test_id"] = test_id
-
-    n = context.user_data["current_q"]
-    total = context.user_data["question_count"]
-    await query.edit_message_text(t(lang, "question_n", n=n, total=total))
-    return QUESTION_TEXT
-
-
-async def receive_question_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    lang = context.user_data["lang"]
-    text = update.message.text.strip()
-    if not text:
         n = context.user_data["current_q"]
         total = context.user_data["question_count"]
-        await update.message.reply_text(t(lang, "question_n", n=n, total=total))
-        return QUESTION_TEXT
+        await query.message.reply_text(t(lang, "question_n", n=n, total=total))
+        return
 
-    context.user_data["current_question_text"] = text
-    await update.message.reply_text(t(lang, "enter_options"))
-    return QUESTION_OPTIONS
+    if data.startswith("correct_"):
+        if step != "correct":
+            return
+        await query.answer()
+        lang = _lang(context)
+        correct_index = int(data.replace("correct_", ""))
+
+        n = context.user_data["current_q"]
+        db.add_question(
+            test_id=context.user_data["test_id"],
+            number=n,
+            text=context.user_data["current_question_text"],
+            options=context.user_data["current_options"],
+            correct_index=correct_index,
+        )
+
+        total = context.user_data["question_count"]
+        if n < total:
+            context.user_data["current_q"] = n + 1
+            context.user_data["create_step"] = "question_text"
+            await query.message.reply_text(t(lang, "question_n", n=n + 1, total=total))
+            return
+
+        context.user_data["create_step"] = "results_delay"
+        await query.message.reply_text(
+            t(lang, "choose_results_delay"),
+            reply_markup=_delay_keyboard(lang),
+        )
+        return
+
+    if data.startswith("delay_"):
+        if step != "results_delay":
+            return
+        await query.answer()
+        lang = _lang(context)
+        delay_key = data.replace("delay_", "")
+        delay_sec = RESULTS_DELAY_OPTIONS[delay_key]
+
+        test_id = context.user_data["test_id"]
+        db.set_results_delay(test_id, delay_sec)
+        db.activate_test(test_id)
+
+        me = await context.bot.get_me()
+        link = test_deep_link(me.username, test_id)
+        name = context.user_data["test_name"]
+
+        await query.message.reply_text(t(lang, "test_ready", name=name))
+        await context.bot.send_message(
+            chat_id=update.effective_user.id,
+            text=t(lang, "test_link_text", name=name, link=link),
+        )
+
+        context.job_queue.run_once(
+            send_results_job,
+            when=delay_sec,
+            data={"test_id": test_id},
+            name=f"results_{test_id}",
+        )
+
+        _clear_create(context)
 
 
-async def receive_options(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    lang = context.user_data["lang"]
-    options = [line.strip() for line in update.message.text.strip().split("\n") if line.strip()]
-    if len(options) < 2:
-        await update.message.reply_text(t(lang, "min_options"))
-        return QUESTION_OPTIONS
+async def on_create_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    step = context.user_data.get("create_step")
+    if step not in ("test_name", "question_count", "question_text", "question_options"):
+        return
 
-    context.user_data["current_options"] = options
-    buttons = [
-        [InlineKeyboardButton(f"{i + 1}. {opt}", callback_data=f"correct_{i}")]
-        for i, opt in enumerate(options)
-    ]
-    await update.message.reply_text(
-        t(lang, "choose_correct"),
-        reply_markup=InlineKeyboardMarkup(buttons),
-    )
-    return CORRECT_ANSWER
+    lang = _lang(context)
+    text = (update.message.text or "").strip()
 
+    if step == "test_name":
+        if not text:
+            await update.message.reply_text(t(lang, "enter_test_name"))
+            raise ApplicationHandlerStop
+        context.user_data["test_name"] = text
+        context.user_data["create_step"] = "question_count"
+        await update.message.reply_text(t(lang, "enter_question_count"))
+        raise ApplicationHandlerStop
 
-async def choose_correct(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    lang = context.user_data["lang"]
-    correct_index = int(query.data.replace("correct_", ""))
+    if step == "question_count":
+        try:
+            count = int(text)
+            if count < 1:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text(t(lang, "invalid_number"))
+            raise ApplicationHandlerStop
 
-    n = context.user_data["current_q"]
-    db.add_question(
-        test_id=context.user_data["test_id"],
-        number=n,
-        text=context.user_data["current_question_text"],
-        options=context.user_data["current_options"],
-        correct_index=correct_index,
-    )
+        context.user_data["question_count"] = count
+        context.user_data["current_q"] = 1
+        context.user_data["create_step"] = "time"
+        await update.message.reply_text(
+            t(lang, "choose_time"),
+            reply_markup=_time_keyboard(lang),
+        )
+        raise ApplicationHandlerStop
 
-    total = context.user_data["question_count"]
-    if n < total:
-        context.user_data["current_q"] = n + 1
-        await query.edit_message_text(t(lang, "question_n", n=n + 1, total=total))
-        return QUESTION_TEXT
+    if step == "question_text":
+        if not text:
+            n = context.user_data["current_q"]
+            total = context.user_data["question_count"]
+            await update.message.reply_text(t(lang, "question_n", n=n, total=total))
+            raise ApplicationHandlerStop
 
-    await query.edit_message_text(
-        t(lang, "choose_results_delay"),
-        reply_markup=_delay_keyboard(lang),
-    )
-    return RESULTS_DELAY
+        context.user_data["current_question_text"] = text
+        context.user_data["create_step"] = "question_options"
+        await update.message.reply_text(t(lang, "enter_options"))
+        raise ApplicationHandlerStop
 
+    if step == "question_options":
+        options = [line.strip() for line in text.split("\n") if line.strip()]
+        if len(options) < 2:
+            await update.message.reply_text(t(lang, "min_options"))
+            raise ApplicationHandlerStop
 
-async def choose_delay(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    lang = context.user_data["lang"]
-    delay_key = query.data.replace("delay_", "")
-    delay_sec = RESULTS_DELAY_OPTIONS[delay_key]
-
-    test_id = context.user_data["test_id"]
-    db.set_results_delay(test_id, delay_sec)
-    db.activate_test(test_id)
-
-    me = await context.bot.get_me()
-    link = test_deep_link(me.username, test_id)
-    name = context.user_data["test_name"]
-
-    link_message = t(lang, "test_link_text", name=name, link=link)
-    await query.edit_message_text(t(lang, "test_ready", name=name))
-    await context.bot.send_message(
-        chat_id=update.effective_user.id,
-        text=link_message,
-    )
-
-    context.job_queue.run_once(
-        send_results_job,
-        when=delay_sec,
-        data={"test_id": test_id},
-        name=f"results_{test_id}",
-    )
-
-    context.user_data.clear()
-    return ConversationHandler.END
+        context.user_data["current_options"] = options
+        context.user_data["create_step"] = "correct"
+        buttons = [
+            [InlineKeyboardButton(f"{i + 1}. {opt}", callback_data=f"correct_{i}")]
+            for i, opt in enumerate(options)
+        ]
+        await update.message.reply_text(
+            t(lang, "choose_correct"),
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+        raise ApplicationHandlerStop
 
 
 async def send_results_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     await finish_test_and_send_results(context, context.job.data["test_id"])
 
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    lang = context.user_data.get("lang") or db.get_user_lang(update.effective_user.id)
-    context.user_data.clear()
-    await update.message.reply_text(t(lang, "cancelled"))
-    return ConversationHandler.END
-
-
-def build_creator_handler() -> ConversationHandler:
-    return ConversationHandler(
-        entry_points=[CommandHandler("start", start_entry)],
-        states={
-            LANG: [CallbackQueryHandler(choose_lang, pattern="^lang_")],
-            TEST_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_test_name)],
-            QUESTION_COUNT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_question_count)
-            ],
-            TIME_PER_Q: [CallbackQueryHandler(choose_time, pattern="^time_")],
-            QUESTION_TEXT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_question_text)
-            ],
-            QUESTION_OPTIONS: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_options)
-            ],
-            CORRECT_ANSWER: [
-                CallbackQueryHandler(choose_correct, pattern="^correct_")
-            ],
-            RESULTS_DELAY: [CallbackQueryHandler(choose_delay, pattern="^delay_")],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        allow_reentry=True,
-    )
+def build_creator_handlers() -> list:
+    return [
+        CommandHandler("start", cmd_start),
+        CommandHandler("cancel", cmd_cancel),
+        CallbackQueryHandler(on_create_callback, pattern="^(lang_|time_|correct_|delay_)"),
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            on_create_message,
+            block=False,
+        ),
+    ]

@@ -13,7 +13,7 @@ from config import RESULTS_DELAY_OPTIONS, TIME_OPTIONS
 from handlers.results_cmd import finish_test_and_send_results
 from handlers.taker import start_test_from_link
 from locales import t
-from utils import test_deep_link
+from utils import option_label, test_deep_link
 
 
 def _lang_keyboard() -> InlineKeyboardMarkup:
@@ -254,9 +254,9 @@ async def on_create_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
         context.user_data["current_options"] = options
         context.user_data["create_step"] = "correct"
-        options_text = "\n".join(f"{i + 1}. {opt}" for i, opt in enumerate(options))
+        options_text = "\n".join(f"{option_label(i)}. {opt}" for i, opt in enumerate(options))
         buttons = [
-            [InlineKeyboardButton(str(i + 1), callback_data=f"correct_{i}")]
+            [InlineKeyboardButton(option_label(i), callback_data=f"correct_{i}")]
             for i in range(len(options))
         ]
         await update.message.reply_text(

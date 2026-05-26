@@ -14,7 +14,7 @@ from telegram.ext import (
 
 import database as db
 from locales import t
-from utils import display_name
+from utils import option_label
 
 logger = logging.getLogger(__name__)
 
@@ -27,13 +27,13 @@ FIO_MAX_LEN = 120
 def _options_list_text(lang: str, options: list[str]) -> str:
     lines = [t(lang, "answer_options")]
     for i, opt in enumerate(options):
-        lines.append(f"{i + 1}. {opt}")
+        lines.append(f"{option_label(i)}. {opt}")
     return "\n".join(lines)
 
 
 def _options_keyboard(option_count: int) -> InlineKeyboardMarkup:
     buttons = [
-        [InlineKeyboardButton(str(i + 1), callback_data=f"ans_{i}")]
+        [InlineKeyboardButton(option_label(i), callback_data=f"ans_{i}")]
         for i in range(option_count)
     ]
     return InlineKeyboardMarkup(buttons)

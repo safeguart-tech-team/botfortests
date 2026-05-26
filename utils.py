@@ -15,6 +15,20 @@ def test_deep_link(bot_username: str, test_id: int) -> str:
     return f"https://t.me/{bot_username}?start=test_{test_id}"
 
 
+def option_label(index: int) -> str:
+    """A, B, C, … Z, AA, AB, … for option index 0, 1, 2, …"""
+    if index < 0:
+        return "?"
+    label = ""
+    n = index
+    while True:
+        label = chr(ord("A") + n % 26) + label
+        n = n // 26 - 1
+        if n < 0:
+            break
+    return label
+
+
 def format_results(lang: str, test_name: str, participants: list, total_q: int) -> str:
     if not participants:
         return t(lang, "results_title", name=test_name, count=0) + t(lang, "no_participants")

@@ -1,0 +1,75 @@
+import logging
+import sys
+
+from telegram.error import InvalidToken
+from telegram.ext import Application
+
+from config import BOT_TOKEN, is_valid_bot_token
+from database import finish_test, get_active_tests_past_deadline, get_participants_ranked, init_db
+from handlers.creator import build_creator_handler
+from handlers.results_cmd import build_results_handlers
+from handlers.taker import build_taker_handler
+from utils import format_results
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
+
+
+async def on_error(update: object, context) -> None:
+    logger.error("Ошибка при обработке сообщения:", exc_info=context.error)
+
+_TOKEN_HELP = """
+Ошибка: токен бота не настроен или неверный.
+
+1. Откройте @BotFather в Telegram → /mybots → ваш бот → API Token
+2. Скопируйте токен (формат: 123456789:AAHxxxxxxxx...)
+3. Откройте файл .env в папке TestBot
+4. Вставьте токен в строку:
+   BOT_TOKEN=сюда_ваш_токен
+5. Сохраните файл и снова запустите: .venv\\Scripts\\python main.py
+
+Не используйте пример из .env.example — нужен ваш настоящий токен.
+"""
+
+
+async def check_missed_deadlines(context) -> None:
+    for test in get_active_tests_past_deadline():
+        test_id = test["id"]
+        finish_test(test_id)
+        participants = get_participants_ranked(test_id)
+        message = format_results(
+            test["lang"], test["name"], participants, test["question_count"]
+        )
+        await context.bot.send_message(chat_id=test["creator_id"], text=message)
+
+
+def main() -> None:
+    if not is_valid_bot_token(BOT_TOKEN):
+        print(_TOKEN_HELP, file=sys.stderr)
+        sys.exit(1)
+
+    init_db()
+
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_error_handler(on_error)
+
+    for handler in build_results_handlers():
+        app.add_handler(handler)
+    app.add_handler(build_creator_handler())
+    app.add_handler(build_taker_handler())
+
+    app.job_queue.run_repeating(check_missed_deadlines, interval=60, first=10)
+
+    logger.info("Bot started, connecting to Telegram...")
+    try:
+        app.run_polling(allowed_updates=["message", "callback_query"])
+    except InvalidToken:
+        print(_TOKEN_HELP, file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

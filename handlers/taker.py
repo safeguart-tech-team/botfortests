@@ -92,7 +92,53 @@ async def start_test_from_link(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(t(lang, "test_not_found"))
         return True
 
-    participant_id = db.create_participant(test_id, user.id, display_name(user))
+    total = len(questions)
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton(t(lang, "btn_start"), callback_data=f"begin_{test_id}")]]
+    )
+    await update.message.reply_text(
+        t(lang, "test_invite", name=test["name"], total=total),
+        reply_markup=keyboard,
+    )
+    return True
+
+
+async def on_begin_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    user = update.effective_user
+    user_id = user.id
+
+    try:
+        test_id = int(query.data.replace("begin_", ""))
+    except ValueError:
+        return
+
+    test = db.get_test(test_id)
+    lang = test["lang"] if test else db.get_user_lang(user_id)
+
+    if not test or test["status"] != "active":
+        await query.answer()
+        await query.edit_message_text(t(lang, "test_not_found"))
+        return
+
+    if db.has_participated(test_id, user_id):
+        await query.answer()
+        await query.edit_message_text(t(lang, "already_participated"))
+        return
+
+    if user_id in _active_sessions:
+        await query.answer()
+        return
+
+    questions = db.get_questions(test_id)
+    if not questions:
+        await query.answer()
+        await query.edit_message_text(t(lang, "test_not_found"))
+        return
+
+    await query.answer()
+
+    participant_id = db.create_participant(test_id, user_id, display_name(user))
     session = {
         "test_id": test_id,
         "participant_id": participant_id,
@@ -103,12 +149,12 @@ async def start_test_from_link(update: Update, context: ContextTypes.DEFAULT_TYP
         "countdown_task": None,
         "message_id": None,
         "chat_id": update.effective_chat.id,
-        "user_id": user.id,
+        "user_id": user_id,
     }
-    _active_sessions[user.id] = session
+    _active_sessions[user_id] = session
 
+    await query.edit_message_reply_markup(reply_markup=None)
     await _send_question(update, context, session, is_first=True)
-    return True
 
 
 async def _send_question(
@@ -250,5 +296,13 @@ async def _finish_test(
     )
 
 
-def build_taker_handler() -> CallbackQueryHandler:
-    return CallbackQueryHandler(on_answer, pattern="^ans_")
+async def on_taker_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    data = update.callback_query.data
+    if data.startswith("begin_"):
+        await on_begin_test(update, context)
+    elif data.startswith("ans_"):
+        await on_answer(update, context)
+
+
+def build_taker_handlers() -> list[CallbackQueryHandler]:
+    return [CallbackQueryHandler(on_taker_callback, pattern="^(begin_|ans_)")]

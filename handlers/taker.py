@@ -185,7 +185,9 @@ async def _send_question(
     update: Update | None,
     context: ContextTypes.DEFAULT_TYPE,
     session: dict,
+    *,
     is_first: bool = False,
+    edit_in_place: bool = False,
 ) -> None:
     time_limit = session["test"].get("time_per_question")
     if time_limit is not None and time_limit <= 0:
@@ -196,7 +198,11 @@ async def _send_question(
     markup = _options_keyboard(session["questions"][session["index"]]["options"])
     chat_id = session["chat_id"]
 
-    if update and update.callback_query:
+    _cancel_countdown(session)
+
+    if update and update.callback_query and edit_in_place:
+        msg = await update.callback_query.message.edit_text(text, reply_markup=markup)
+    elif update and update.callback_query:
         msg = await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
     elif update and update.message:
         msg = await update.message.reply_text(text, reply_markup=markup)
@@ -205,8 +211,6 @@ async def _send_question(
 
     session["message_id"] = msg.message_id
     session["current_is_first"] = is_first
-
-    _cancel_countdown(session)
 
     if time_limit:
         session["countdown_task"] = asyncio.create_task(
@@ -278,6 +282,8 @@ async def on_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not session or not query.data.startswith("ans_"):
         return
 
+    _cancel_countdown(session)
+
     test = db.get_test(session["test_id"])
     if not test or test["status"] != "active":
         await query.answer()
@@ -288,7 +294,6 @@ async def on_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await query.answer()
-    _cancel_countdown(session)
 
     selected = int(query.data.replace("ans_", ""))
     idx = session["index"]
@@ -305,7 +310,13 @@ async def on_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             pass
         await _finish_test(context, user_id, session)
     else:
-        await _send_question(update, context, session, is_first=False)
+        await _send_question(
+            update,
+            context,
+            session,
+            is_first=False,
+            edit_in_place=True,
+        )
 
 
 async def _finish_test(

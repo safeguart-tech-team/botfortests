@@ -70,6 +70,10 @@ def _clear_create(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.clear()
 
 
+def _clear_fio_wait(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("awaiting_fio_test_id", None)
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if context.args and context.args[0].startswith("test_"):
         await start_test_from_link(update, context)
@@ -103,6 +107,7 @@ async def on_create_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.answer()
         lang = "ru" if data == "lang_ru" else "uz"
         db.set_user_lang(update.effective_user.id, lang)
+        _clear_fio_wait(context)
         context.user_data["lang"] = lang
         context.user_data["create_step"] = "test_name"
         await query.message.reply_text(t(lang, "enter_test_name"))

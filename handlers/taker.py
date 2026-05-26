@@ -189,6 +189,9 @@ async def on_begin_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def on_fio_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if context.user_data.get("create_step"):
+        return
+
     test_id = context.user_data.get("awaiting_fio_test_id")
     if not test_id:
         return

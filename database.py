@@ -191,13 +191,31 @@ def get_questions(test_id: int) -> list[dict[str, Any]]:
     return result
 
 
-def has_participated(test_id: int, user_id: int) -> bool:
+def has_completed_participation(test_id: int, user_id: int) -> bool:
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT 1 FROM participants WHERE test_id = ? AND user_id = ?",
+            """
+            SELECT 1 FROM participants
+            WHERE test_id = ? AND user_id = ? AND finished_at IS NOT NULL
+            """,
             (test_id, user_id),
         ).fetchone()
     return row is not None
+
+
+def reset_incomplete_participation(test_id: int, user_id: int) -> None:
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT id FROM participants
+            WHERE test_id = ? AND user_id = ? AND finished_at IS NULL
+            """,
+            (test_id, user_id),
+        ).fetchall()
+        for row in rows:
+            pid = row["id"]
+            conn.execute("DELETE FROM answers WHERE participant_id = ?", (pid,))
+            conn.execute("DELETE FROM participants WHERE id = ?", (pid,))
 
 
 def create_participant(test_id: int, user_id: int, display_name: str) -> int:

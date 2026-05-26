@@ -1,4 +1,5 @@
 import asyncio
+import logging
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
@@ -7,6 +8,8 @@ from telegram.ext import CallbackQueryHandler, ContextTypes
 import database as db
 from locales import t
 from utils import display_name
+
+logger = logging.getLogger(__name__)
 
 _active_sessions: dict[int, dict] = {}
 
@@ -42,6 +45,12 @@ def _cancel_countdown(session: dict) -> None:
     if task and not task.done():
         task.cancel()
     session["countdown_task"] = None
+
+
+def _clear_user_session(user_id: int) -> None:
+    session = _active_sessions.pop(user_id, None)
+    if session:
+        _cancel_countdown(session)
 
 
 async def _edit_question_message(
@@ -83,13 +92,13 @@ async def start_test_from_link(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(t(lang, "test_not_found"))
         return True
 
-    if db.has_participated(test_id, user.id):
+    if db.has_completed_participation(test_id, user.id):
         await update.message.reply_text(t(lang, "already_participated"))
         return True
 
     questions = db.get_questions(test_id)
     if not questions:
-        await update.message.reply_text(t(lang, "test_not_found"))
+        await update.message.reply_text(t(lang, "questions_missing"))
         return True
 
     total = len(questions)
@@ -111,6 +120,7 @@ async def on_begin_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     try:
         test_id = int(query.data.replace("begin_", ""))
     except ValueError:
+        await query.answer()
         return
 
     test = db.get_test(test_id)
@@ -118,43 +128,57 @@ async def on_begin_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if not test or test["status"] != "active":
         await query.answer()
-        await query.edit_message_text(t(lang, "test_not_found"))
+        await query.message.reply_text(t(lang, "test_not_found"))
         return
 
-    if db.has_participated(test_id, user_id):
+    if db.has_completed_participation(test_id, user_id):
         await query.answer()
-        await query.edit_message_text(t(lang, "already_participated"))
-        return
-
-    if user_id in _active_sessions:
-        await query.answer()
+        await query.message.reply_text(t(lang, "already_participated"))
         return
 
     questions = db.get_questions(test_id)
     if not questions:
         await query.answer()
-        await query.edit_message_text(t(lang, "test_not_found"))
+        await query.message.reply_text(t(lang, "questions_missing"))
         return
+
+    for q in questions:
+        if not q.get("text") or not q.get("options"):
+            await query.answer()
+            await query.message.reply_text(t(lang, "questions_missing"))
+            return
 
     await query.answer()
 
-    participant_id = db.create_participant(test_id, user_id, display_name(user))
-    session = {
-        "test_id": test_id,
-        "participant_id": participant_id,
-        "lang": lang,
-        "questions": questions,
-        "index": 0,
-        "test": test,
-        "countdown_task": None,
-        "message_id": None,
-        "chat_id": update.effective_chat.id,
-        "user_id": user_id,
-    }
-    _active_sessions[user_id] = session
+    _clear_user_session(user_id)
+    db.reset_incomplete_participation(test_id, user_id)
 
-    await query.edit_message_reply_markup(reply_markup=None)
-    await _send_question(update, context, session, is_first=True)
+    try:
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except BadRequest:
+            pass
+
+        participant_id = db.create_participant(test_id, user_id, display_name(user))
+        session = {
+            "test_id": test_id,
+            "participant_id": participant_id,
+            "lang": lang,
+            "questions": questions,
+            "index": 0,
+            "test": test,
+            "countdown_task": None,
+            "message_id": None,
+            "chat_id": update.effective_chat.id,
+            "user_id": user_id,
+        }
+        _active_sessions[user_id] = session
+        await _send_question(update, context, session, is_first=True)
+    except Exception:
+        logger.exception("Failed to start test %s for user %s", test_id, user_id)
+        _clear_user_session(user_id)
+        db.reset_incomplete_participation(test_id, user_id)
+        await query.message.reply_text(t(lang, "test_start_error"))
 
 
 async def _send_question(
@@ -164,6 +188,8 @@ async def _send_question(
     is_first: bool = False,
 ) -> None:
     time_limit = session["test"].get("time_per_question")
+    if time_limit is not None and time_limit <= 0:
+        time_limit = None
     remaining = time_limit if time_limit else None
 
     text = _question_text(session, is_first=is_first, remaining=remaining)
@@ -171,7 +197,6 @@ async def _send_question(
     chat_id = session["chat_id"]
 
     if update and update.callback_query:
-        await update.callback_query.message.edit_reply_markup(reply_markup=None)
         msg = await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
     elif update and update.message:
         msg = await update.message.reply_text(text, reply_markup=markup)
@@ -258,8 +283,8 @@ async def on_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await query.answer()
         lang = session["lang"]
         name = test["name"] if test else ""
-        await query.edit_message_text(t(lang, "test_finished", name=name))
-        _active_sessions.pop(user_id, None)
+        await query.message.reply_text(t(lang, "test_finished", name=name))
+        _clear_user_session(user_id)
         return
 
     await query.answer()
@@ -274,7 +299,10 @@ async def on_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     session["index"] += 1
     if session["index"] >= len(session["questions"]):
-        await query.message.edit_reply_markup(reply_markup=None)
+        try:
+            await query.message.edit_reply_markup(reply_markup=None)
+        except BadRequest:
+            pass
         await _finish_test(context, user_id, session)
     else:
         await _send_question(update, context, session, is_first=False)

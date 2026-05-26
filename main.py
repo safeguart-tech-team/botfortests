@@ -61,11 +61,11 @@ def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_error_handler(on_error)
 
+    for handler in build_taker_handlers():
+        app.add_handler(handler)
     for handler in build_results_handlers():
         app.add_handler(handler)
     for handler in build_creator_handlers():
-        app.add_handler(handler)
-    for handler in build_taker_handlers():
         app.add_handler(handler)
 
     app.job_queue.run_repeating(check_missed_deadlines, interval=60, first=10)

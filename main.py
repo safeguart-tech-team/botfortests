@@ -9,6 +9,7 @@ from database import finish_test, get_active_tests_past_deadline, get_participan
 from handlers.creator import build_creator_handlers
 from handlers.results_cmd import build_results_handlers
 from handlers.taker import build_taker_handlers
+from handlers.text_router import build_text_handler
 from utils import format_results
 
 logging.basicConfig(
@@ -61,11 +62,12 @@ def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_error_handler(on_error)
 
-    for handler in build_taker_handlers():
+    app.add_handler(build_text_handler())
+    for handler in build_creator_handlers():
         app.add_handler(handler)
     for handler in build_results_handlers():
         app.add_handler(handler)
-    for handler in build_creator_handlers():
+    for handler in build_taker_handlers():
         app.add_handler(handler)
 
     app.job_queue.run_repeating(check_missed_deadlines, interval=60, first=10)

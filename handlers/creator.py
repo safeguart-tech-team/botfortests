@@ -4,8 +4,6 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
-    MessageHandler,
-    filters,
 )
 
 import database as db
@@ -70,7 +68,7 @@ def _clear_create(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.clear()
 
 
-def _clear_fio_wait(context: ContextTypes.DEFAULT_TYPE) -> None:
+def _clear_participant_wait(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("awaiting_fio_test_id", None)
 
 
@@ -80,6 +78,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     _clear_create(context)
+    _clear_participant_wait(context)
     context.user_data["create_step"] = "lang"
     await update.effective_message.reply_text(
         t("ru", "choose_lang"),
@@ -107,7 +106,7 @@ async def on_create_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.answer()
         lang = "ru" if data == "lang_ru" else "uz"
         db.set_user_lang(update.effective_user.id, lang)
-        _clear_fio_wait(context)
+        _clear_participant_wait(context)
         context.user_data["lang"] = lang
         context.user_data["create_step"] = "test_name"
         await query.message.reply_text(t(lang, "enter_test_name"))
@@ -280,9 +279,4 @@ def build_creator_handlers() -> list:
         CommandHandler("start", cmd_start),
         CommandHandler("cancel", cmd_cancel),
         CallbackQueryHandler(on_create_callback, pattern="^(lang_|time_|correct_|delay_)"),
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            on_create_message,
-            block=False,
-        ),
     ]

@@ -214,12 +214,15 @@ async def on_begin_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     except BadRequest:
         pass
 
-    context.user_data.clear()
+    _clear_creator_state(context)
     context.user_data["awaiting_fio_test_id"] = test_id
     await query.message.reply_text(t(lang, "enter_full_name"))
 
 
 async def on_fio_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if context.user_data.get("create_step"):
+        return
+
     test_id = context.user_data.get("awaiting_fio_test_id")
     if not test_id:
         return
@@ -509,10 +512,5 @@ async def on_taker_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 def build_taker_handlers() -> list:
     return [
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            on_fio_message,
-            block=False,
-        ),
         CallbackQueryHandler(on_taker_callback, pattern="^(begin_|ans_)"),
     ]

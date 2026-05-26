@@ -1,9 +1,16 @@
 import asyncio
 import logging
+import re
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
-from telegram.ext import CallbackQueryHandler, ContextTypes
+from telegram.ext import (
+    ApplicationHandlerStop,
+    CallbackQueryHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 import database as db
 from locales import t
@@ -12,12 +19,22 @@ from utils import display_name
 logger = logging.getLogger(__name__)
 
 _active_sessions: dict[int, dict] = {}
+FIO_MIN_LEN = 5
+FIO_MIN_WORDS = 2
+FIO_MAX_LEN = 120
 
 
-def _options_keyboard(options: list[str]) -> InlineKeyboardMarkup:
+def _options_list_text(lang: str, options: list[str]) -> str:
+    lines = [t(lang, "answer_options")]
+    for i, opt in enumerate(options):
+        lines.append(f"{i + 1}. {opt}")
+    return "\n".join(lines)
+
+
+def _options_keyboard(option_count: int) -> InlineKeyboardMarkup:
     buttons = [
-        [InlineKeyboardButton(opt, callback_data=f"ans_{i}")]
-        for i, opt in enumerate(options)
+        [InlineKeyboardButton(str(i + 1), callback_data=f"ans_{i}")]
+        for i in range(option_count)
     ]
     return InlineKeyboardMarkup(buttons)
 
@@ -28,16 +45,26 @@ def _question_text(session: dict, *, is_first: bool, remaining: int | None) -> s
     lang = session["lang"]
     test = session["test"]
     total = len(session["questions"])
+    options = q["options"]
 
     if is_first:
         header = t(lang, "start_test", name=test["name"], total=total)
     else:
         header = t(lang, "question_header", n=idx + 1, total=total)
 
-    text = f"{header}\n\n{q['text']}"
+    parts = [header, "", q["text"], "", _options_list_text(lang, options)]
     if remaining is not None:
-        text += f"\n\n{t(lang, 'time_left', sec=remaining)}"
-    return text
+        parts.append("")
+        parts.append(t(lang, "time_left", sec=remaining))
+    return "\n".join(parts)
+
+
+def _is_valid_fio(text: str) -> bool:
+    text = text.strip()
+    if len(text) < FIO_MIN_LEN or len(text) > FIO_MAX_LEN:
+        return False
+    words = [w for w in re.split(r"\s+", text) if w]
+    return len(words) >= FIO_MIN_WORDS
 
 
 def _cancel_countdown(session: dict) -> None:
@@ -53,6 +80,10 @@ def _clear_user_session(user_id: int) -> None:
         _cancel_countdown(session)
 
 
+def _clear_fio_wait(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("awaiting_fio_test_id", None)
+
+
 async def _edit_question_message(
     context: ContextTypes.DEFAULT_TYPE,
     session: dict,
@@ -61,7 +92,8 @@ async def _edit_question_message(
     remaining: int | None,
 ) -> None:
     text = _question_text(session, is_first=is_first, remaining=remaining)
-    markup = _options_keyboard(session["questions"][session["index"]]["options"])
+    q = session["questions"][session["index"]]
+    markup = _options_keyboard(len(q["options"]))
     try:
         await context.bot.edit_message_text(
             chat_id=session["chat_id"],
@@ -101,6 +133,7 @@ async def start_test_from_link(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(t(lang, "questions_missing"))
         return True
 
+    _clear_fio_wait(context)
     total = len(questions)
     keyboard = InlineKeyboardMarkup(
         [[InlineKeyboardButton(t(lang, "btn_start"), callback_data=f"begin_{test_id}")]]
@@ -114,8 +147,7 @@ async def start_test_from_link(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def on_begin_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    user = update.effective_user
-    user_id = user.id
+    user_id = update.effective_user.id
 
     try:
         test_id = int(query.data.replace("begin_", ""))
@@ -142,24 +174,56 @@ async def on_begin_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await query.message.reply_text(t(lang, "questions_missing"))
         return
 
-    for q in questions:
-        if not q.get("text") or not q.get("options"):
-            await query.answer()
-            await query.message.reply_text(t(lang, "questions_missing"))
-            return
-
     await query.answer()
 
     _clear_user_session(user_id)
     db.reset_incomplete_participation(test_id, user_id)
 
     try:
-        try:
-            await query.edit_message_reply_markup(reply_markup=None)
-        except BadRequest:
-            pass
+        await query.edit_message_reply_markup(reply_markup=None)
+    except BadRequest:
+        pass
 
-        participant_id = db.create_participant(test_id, user_id, display_name(user))
+    context.user_data["awaiting_fio_test_id"] = test_id
+    await query.message.reply_text(t(lang, "enter_full_name"))
+
+
+async def on_fio_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    test_id = context.user_data.get("awaiting_fio_test_id")
+    if not test_id:
+        return
+
+    user_id = update.effective_user.id
+    test = db.get_test(test_id)
+    lang = test["lang"] if test else db.get_user_lang(user_id)
+
+    if not test or test["status"] != "active":
+        _clear_fio_wait(context)
+        await update.message.reply_text(t(lang, "test_not_found"))
+        raise ApplicationHandlerStop
+
+    if db.has_completed_participation(test_id, user_id):
+        _clear_fio_wait(context)
+        await update.message.reply_text(t(lang, "already_participated"))
+        raise ApplicationHandlerStop
+
+    fio = (update.message.text or "").strip()
+    if not _is_valid_fio(fio):
+        await update.message.reply_text(t(lang, "invalid_full_name"))
+        raise ApplicationHandlerStop
+
+    questions = db.get_questions(test_id)
+    if not questions:
+        _clear_fio_wait(context)
+        await update.message.reply_text(t(lang, "questions_missing"))
+        raise ApplicationHandlerStop
+
+    _clear_fio_wait(context)
+    _clear_user_session(user_id)
+    db.reset_incomplete_participation(test_id, user_id)
+
+    try:
+        participant_id = db.create_participant(test_id, user_id, fio)
         session = {
             "test_id": test_id,
             "participant_id": participant_id,
@@ -175,10 +239,12 @@ async def on_begin_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         _active_sessions[user_id] = session
         await _send_question(update, context, session, is_first=True)
     except Exception:
-        logger.exception("Failed to start test %s for user %s", test_id, user_id)
+        logger.exception("Failed to start test %s for user %s after FIO", test_id, user_id)
         _clear_user_session(user_id)
         db.reset_incomplete_participation(test_id, user_id)
-        await query.message.reply_text(t(lang, "test_start_error"))
+        await update.message.reply_text(t(lang, "test_start_error"))
+
+    raise ApplicationHandlerStop
 
 
 async def _send_question(
@@ -195,7 +261,8 @@ async def _send_question(
     remaining = time_limit if time_limit else None
 
     text = _question_text(session, is_first=is_first, remaining=remaining)
-    markup = _options_keyboard(session["questions"][session["index"]]["options"])
+    q = session["questions"][session["index"]]
+    markup = _options_keyboard(len(q["options"]))
     chat_id = session["chat_id"]
 
     _cancel_countdown(session)
@@ -343,5 +410,12 @@ async def on_taker_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await on_answer(update, context)
 
 
-def build_taker_handlers() -> list[CallbackQueryHandler]:
-    return [CallbackQueryHandler(on_taker_callback, pattern="^(begin_|ans_)")]
+def build_taker_handlers() -> list:
+    return [
+        CallbackQueryHandler(on_taker_callback, pattern="^(begin_|ans_)"),
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            on_fio_message,
+            block=False,
+        ),
+    ]

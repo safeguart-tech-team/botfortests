@@ -42,6 +42,7 @@ def _time_keyboard(lang: str) -> InlineKeyboardMarkup:
 
 def _delay_keyboard(lang: str) -> InlineKeyboardMarkup:
     keys = [
+        ("delay_manual", "manual"),
         ("delay_10m", "10m"),
         ("delay_1h", "1h"),
         ("delay_5h", "5h"),
@@ -49,9 +50,9 @@ def _delay_keyboard(lang: str) -> InlineKeyboardMarkup:
         ("delay_15h", "15h"),
         ("delay_20h", "20h"),
     ]
-    rows = []
+    rows = [[InlineKeyboardButton(t(lang, "delay_manual"), callback_data="delay_manual")]]
     row = []
-    for label_key, data_key in keys:
+    for label_key, data_key in keys[1:]:
         row.append(InlineKeyboardButton(t(lang, label_key), callback_data=f"delay_{data_key}"))
         if len(row) == 2:
             rows.append(row)
@@ -176,18 +177,24 @@ async def on_create_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         link = test_deep_link(me.username, test_id)
         name = context.user_data["test_name"]
 
-        await query.message.reply_text(t(lang, "test_ready", name=name))
+        if delay_sec <= 0:
+            ready_text = t(lang, "test_ready_manual", name=name)
+        else:
+            ready_text = t(lang, "test_ready", name=name)
+
+        await query.message.reply_text(ready_text)
         await context.bot.send_message(
             chat_id=update.effective_user.id,
             text=t(lang, "test_link_text", name=name, link=link),
         )
 
-        context.job_queue.run_once(
-            send_results_job,
-            when=delay_sec,
-            data={"test_id": test_id},
-            name=f"results_{test_id}",
-        )
+        if delay_sec > 0:
+            context.job_queue.run_once(
+                send_results_job,
+                when=delay_sec,
+                data={"test_id": test_id},
+                name=f"results_{test_id}",
+            )
 
         _clear_create(context)
 
@@ -247,12 +254,13 @@ async def on_create_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
         context.user_data["current_options"] = options
         context.user_data["create_step"] = "correct"
+        options_text = "\n".join(f"{i + 1}. {opt}" for i, opt in enumerate(options))
         buttons = [
-            [InlineKeyboardButton(f"{i + 1}. {opt}", callback_data=f"correct_{i}")]
-            for i, opt in enumerate(options)
+            [InlineKeyboardButton(str(i + 1), callback_data=f"correct_{i}")]
+            for i in range(len(options))
         ]
         await update.message.reply_text(
-            t(lang, "choose_correct"),
+            f"{t(lang, 'choose_correct')}\n\n{options_text}",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
         raise ApplicationHandlerStop

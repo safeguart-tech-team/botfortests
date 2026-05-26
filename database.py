@@ -297,7 +297,10 @@ def get_active_tests_past_deadline() -> list[dict[str, Any]]:
         issued = datetime.fromisoformat(test["link_issued_at"])
         if issued.tzinfo is None:
             issued = issued.replace(tzinfo=timezone.utc)
+        delay = test["results_delay_sec"]
+        if delay is None or delay <= 0:
+            continue
         elapsed = (now - issued).total_seconds()
-        if elapsed >= test["results_delay_sec"]:
+        if elapsed >= delay:
             due.append(test)
     return due

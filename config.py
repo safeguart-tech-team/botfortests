@@ -63,6 +63,7 @@ TIME_OPTIONS = {
 }
 
 RESULTS_DELAY_OPTIONS = {
+    "manual": 0,
     "10m": 10 * 60,
     "1h": 60 * 60,
     "5h": 5 * 60 * 60,

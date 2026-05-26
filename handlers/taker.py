@@ -22,6 +22,8 @@ _active_sessions: dict[int, dict] = {}
 FIO_MIN_LEN = 5
 FIO_MIN_WORDS = 2
 FIO_MAX_LEN = 120
+TG_TEXT_LIMIT = 4096
+SAFE_TEXT_LIMIT = 3800
 
 
 def _options_list_text(lang: str, options: list[str]) -> str:
@@ -59,12 +61,39 @@ def _question_text(session: dict, *, is_first: bool, remaining: int | None) -> s
     return "\n".join(parts)
 
 
+def _question_header(session: dict, *, is_first: bool) -> str:
+    idx = session["index"]
+    lang = session["lang"]
+    test = session["test"]
+    total = len(session["questions"])
+    if is_first:
+        return t(lang, "start_test", name=test["name"], total=total)
+    return t(lang, "question_header", n=idx + 1, total=total)
+
+
 def _is_valid_fio(text: str) -> bool:
     text = text.strip()
     if len(text) < FIO_MIN_LEN or len(text) > FIO_MAX_LEN:
         return False
     words = [w for w in re.split(r"\s+", text) if w]
-    return len(words) >= FIO_MIN_WORDS
+    if len(words) >= FIO_MIN_WORDS:
+        return True
+    return len(text) >= 8
+
+
+def _clear_creator_state(context: ContextTypes.DEFAULT_TYPE) -> None:
+    for key in (
+        "create_step",
+        "lang",
+        "test_name",
+        "question_count",
+        "current_q",
+        "test_id",
+        "time_per_question",
+        "current_question_text",
+        "current_options",
+    ):
+        context.user_data.pop(key, None)
 
 
 def _cancel_countdown(session: dict) -> None:
@@ -133,6 +162,7 @@ async def start_test_from_link(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(t(lang, "questions_missing"))
         return True
 
+    _clear_creator_state(context)
     _clear_fio_wait(context)
     total = len(questions)
     keyboard = InlineKeyboardMarkup(
@@ -184,14 +214,12 @@ async def on_begin_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     except BadRequest:
         pass
 
+    context.user_data.clear()
     context.user_data["awaiting_fio_test_id"] = test_id
     await query.message.reply_text(t(lang, "enter_full_name"))
 
 
 async def on_fio_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if context.user_data.get("create_step"):
-        return
-
     test_id = context.user_data.get("awaiting_fio_test_id")
     if not test_id:
         return
@@ -250,6 +278,54 @@ async def on_fio_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     raise ApplicationHandlerStop
 
 
+async def _deliver_question(
+    context: ContextTypes.DEFAULT_TYPE,
+    session: dict,
+    *,
+    chat_id: int,
+    text: str,
+    markup: InlineKeyboardMarkup,
+    edit_message=None,
+    reply_message=None,
+) -> int:
+    try:
+        if edit_message is not None:
+            msg = await edit_message.edit_text(text, reply_markup=markup)
+        elif reply_message is not None:
+            msg = await reply_message.reply_text(text, reply_markup=markup)
+        else:
+            msg = await context.bot.send_message(
+                chat_id=chat_id, text=text, reply_markup=markup
+            )
+        return msg.message_id
+    except BadRequest as err:
+        if "too long" not in str(err).lower():
+            raise
+
+    idx = session["index"]
+    q = session["questions"][idx]
+    lang = session["lang"]
+    header = _question_header(session, is_first=session.get("current_is_first", False))
+    timer = ""
+    remaining = session.get("_display_remaining")
+    if remaining is not None:
+        timer = f"\n\n{t(lang, 'time_left', sec=remaining)}"
+
+    part1 = f"{header}\n\n{q['text']}{timer}"
+    part2 = _options_list_text(lang, q["options"])
+
+    if edit_message is not None:
+        await edit_message.edit_text(part1)
+        msg = await context.bot.send_message(chat_id=chat_id, text=part2, reply_markup=markup)
+    elif reply_message is not None:
+        await reply_message.reply_text(part1)
+        msg = await reply_message.reply_text(part2, reply_markup=markup)
+    else:
+        await context.bot.send_message(chat_id=chat_id, text=part1)
+        msg = await context.bot.send_message(chat_id=chat_id, text=part2, reply_markup=markup)
+    return msg.message_id
+
+
 async def _send_question(
     update: Update | None,
     context: ContextTypes.DEFAULT_TYPE,
@@ -262,25 +338,42 @@ async def _send_question(
     if time_limit is not None and time_limit <= 0:
         time_limit = None
     remaining = time_limit if time_limit else None
+    session["_display_remaining"] = remaining
+    session["current_is_first"] = is_first
 
     text = _question_text(session, is_first=is_first, remaining=remaining)
+    if len(text) > SAFE_TEXT_LIMIT:
+        idx = session["index"]
+        lang = session["lang"]
+        header = _question_header(session, is_first=is_first)
+        q = session["questions"][idx]
+        timer = f"\n\n{t(lang, 'time_left', sec=remaining)}" if remaining is not None else ""
+        text = f"{header}\n\n{q['text']}{timer}\n\n{t(lang, 'choose_answer_btn')}"
+
     q = session["questions"][session["index"]]
     markup = _options_keyboard(len(q["options"]))
     chat_id = session["chat_id"]
 
     _cancel_countdown(session)
 
+    edit_message = None
+    reply_message = None
     if update and update.callback_query and edit_in_place:
-        msg = await update.callback_query.message.edit_text(text, reply_markup=markup)
+        edit_message = update.callback_query.message
     elif update and update.callback_query:
-        msg = await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
+        reply_message = None
     elif update and update.message:
-        msg = await update.message.reply_text(text, reply_markup=markup)
-    else:
-        msg = await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
+        reply_message = update.message
 
-    session["message_id"] = msg.message_id
-    session["current_is_first"] = is_first
+    session["message_id"] = await _deliver_question(
+        context,
+        session,
+        chat_id=chat_id,
+        text=text,
+        markup=markup,
+        edit_message=edit_message if edit_in_place else None,
+        reply_message=reply_message,
+    )
 
     if time_limit:
         session["countdown_task"] = asyncio.create_task(
@@ -302,6 +395,7 @@ async def _countdown_and_timeout(
                 return
 
             if remaining > 0:
+                session["_display_remaining"] = remaining
                 await _edit_question_message(
                     context,
                     session,
@@ -415,10 +509,10 @@ async def on_taker_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 def build_taker_handlers() -> list:
     return [
-        CallbackQueryHandler(on_taker_callback, pattern="^(begin_|ans_)"),
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
             on_fio_message,
             block=False,
         ),
+        CallbackQueryHandler(on_taker_callback, pattern="^(begin_|ans_)"),
     ]

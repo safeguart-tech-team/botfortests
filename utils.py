@@ -29,11 +29,22 @@ def option_label(index: int) -> str:
     return label
 
 
-def format_results(lang: str, test_name: str, participants: list, total_q: int) -> str:
+def format_results(
+    lang: str,
+    test_name: str,
+    participants: list,
+    total_q: int,
+    *,
+    interim: bool = False,
+) -> str:
+    title_key = "interim_results_title" if interim else "results_title"
     if not participants:
-        return t(lang, "results_title", name=test_name, count=0) + t(lang, "no_participants")
+        text = t(lang, title_key, name=test_name, count=0) + t(lang, "no_participants")
+        if interim:
+            text += "\n\n" + t(lang, "interim_results_note")
+        return text
 
-    lines = [t(lang, "results_title", name=test_name, count=len(participants))]
+    lines = [t(lang, title_key, name=test_name, count=len(participants))]
     medals = ["medal_1", "medal_2", "medal_3"]
     for i, p in enumerate(participants):
         if i < 3:
@@ -57,4 +68,7 @@ def format_results(lang: str, test_name: str, participants: list, total_q: int) 
                     total=total_q,
                 )
             )
+    if interim:
+        lines.append("")
+        lines.append(t(lang, "interim_results_note"))
     return "\n".join(lines)

@@ -259,6 +259,23 @@ def finish_participant(participant_id: int) -> None:
         )
 
 
+def count_participants(test_id: int) -> tuple[int, int]:
+    """Возвращает (всего начали, завершили)."""
+    with get_conn() as conn:
+        started = conn.execute(
+            "SELECT COUNT(*) AS c FROM participants WHERE test_id = ?",
+            (test_id,),
+        ).fetchone()["c"]
+        finished = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM participants
+            WHERE test_id = ? AND finished_at IS NOT NULL
+            """,
+            (test_id,),
+        ).fetchone()["c"]
+    return started, finished
+
+
 def get_participants_ranked(test_id: int) -> list[dict[str, Any]]:
     with get_conn() as conn:
         rows = conn.execute(

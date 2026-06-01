@@ -81,6 +81,28 @@ def init_db() -> None:
             );
             """
         )
+        _migrate_participants(conn)
+
+
+def _parse_utc(iso: str) -> datetime:
+    dt = datetime.fromisoformat(iso)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _migrate_participants(conn: sqlite3.Connection) -> None:
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(participants)")}
+    if "started_at" not in cols:
+        conn.execute("ALTER TABLE participants ADD COLUMN started_at TEXT")
+    if "duration_sec" not in cols:
+        conn.execute("ALTER TABLE participants ADD COLUMN duration_sec INTEGER")
+
+
+def _duration_seconds(started_at: str | None, finished_at: str | None) -> int | None:
+    if not started_at or not finished_at:
+        return None
+    return max(0, int((_parse_utc(finished_at) - _parse_utc(started_at)).total_seconds()))
 
 
 def set_user_lang(user_id: int, lang: str) -> None:
@@ -222,10 +244,10 @@ def create_participant(test_id: int, user_id: int, display_name: str) -> int:
     with get_conn() as conn:
         cur = conn.execute(
             """
-            INSERT INTO participants (test_id, user_id, display_name, score)
-            VALUES (?, ?, ?, 0)
+            INSERT INTO participants (test_id, user_id, display_name, score, started_at)
+            VALUES (?, ?, ?, 0, ?)
             """,
-            (test_id, user_id, display_name),
+            (test_id, user_id, display_name, _utcnow()),
         )
         return cur.lastrowid
 
@@ -252,10 +274,20 @@ def save_answer(
 
 
 def finish_participant(participant_id: int) -> None:
+    finished_at = _utcnow()
     with get_conn() as conn:
+        row = conn.execute(
+            "SELECT started_at FROM participants WHERE id = ?", (participant_id,)
+        ).fetchone()
+        started_at = row["started_at"] if row else None
+        duration_sec = _duration_seconds(started_at, finished_at)
         conn.execute(
-            "UPDATE participants SET finished_at = ? WHERE id = ?",
-            (_utcnow(), participant_id),
+            """
+            UPDATE participants
+            SET finished_at = ?, duration_sec = ?
+            WHERE id = ?
+            """,
+            (finished_at, duration_sec, participant_id),
         )
 
 
@@ -282,7 +314,9 @@ def get_participants_ranked(test_id: int) -> list[dict[str, Any]]:
             """
             SELECT * FROM participants
             WHERE test_id = ? AND finished_at IS NOT NULL
-            ORDER BY score DESC, finished_at ASC
+            ORDER BY score DESC,
+                     COALESCE(duration_sec, 999999999) ASC,
+                     finished_at ASC
             """,
             (test_id,),
         ).fetchall()

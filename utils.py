@@ -29,6 +29,16 @@ def option_label(index: int) -> str:
     return label
 
 
+def format_duration(seconds: int | None, lang: str) -> str:
+    if seconds is None:
+        return "—"
+    total = max(0, int(seconds))
+    minutes, secs = divmod(total, 60)
+    if minutes > 0:
+        return t(lang, "time_format_min_sec", min=minutes, sec=secs)
+    return t(lang, "time_format_sec", sec=secs)
+
+
 def format_results(
     lang: str,
     test_name: str,
@@ -44,9 +54,14 @@ def format_results(
             text += "\n\n" + t(lang, "interim_results_note")
         return text
 
-    lines = [t(lang, title_key, name=test_name, count=len(participants))]
+    lines = [
+        t(lang, title_key, name=test_name, count=len(participants)),
+        t(lang, "ranking_by_time_note"),
+        "",
+    ]
     medals = ["medal_1", "medal_2", "medal_3"]
     for i, p in enumerate(participants):
+        time_str = format_duration(p.get("duration_sec"), lang)
         if i < 3:
             lines.append(
                 t(
@@ -55,6 +70,7 @@ def format_results(
                     name=p["display_name"],
                     score=p["score"],
                     total=total_q,
+                    time=time_str,
                 )
             )
         else:
@@ -66,6 +82,7 @@ def format_results(
                     name=p["display_name"],
                     score=p["score"],
                     total=total_q,
+                    time=time_str,
                 )
             )
     if interim:

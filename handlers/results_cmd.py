@@ -17,29 +17,49 @@ def _cancel_results_job(job_queue, test_id: int) -> None:
         job.schedule_removal()
 
 
-async def finish_test_and_send_results(
+async def send_final_results(
     context: ContextTypes.DEFAULT_TYPE,
     test_id: int,
     *,
-    notify_early: bool = False,
-) -> bool:
+    chat_id: int | None = None,
+) -> None:
     test = db.get_test(test_id)
-    if not test or test["status"] == "finished":
-        return False
+    if not test:
+        return
 
     participants = db.get_participants_ranked(test_id)
     message = format_results(
         test["lang"], test["name"], participants, test["question_count"]
     )
+    target = chat_id if chat_id is not None else test["creator_id"]
     for part in split_message(message):
-        await context.bot.send_message(chat_id=test["creator_id"], text=part)
+        await context.bot.send_message(chat_id=target, text=part)
+
+
+async def finish_test_and_send_results(
+    context: ContextTypes.DEFAULT_TYPE,
+    test_id: int,
+    *,
+    notify_early: bool = False,
+    chat_id: int | None = None,
+) -> bool:
+    test = db.get_test(test_id)
+    if not test:
+        return False
+
+    if test["status"] == "finished":
+        await send_final_results(context, test_id, chat_id=chat_id)
+        return True
+
+    await send_final_results(context, test_id, chat_id=chat_id)
 
     db.finish_test(test_id)
     _cancel_results_job(context.job_queue, test_id)
 
     if notify_early:
+        target = chat_id if chat_id is not None else test["creator_id"]
         await context.bot.send_message(
-            chat_id=test["creator_id"],
+            chat_id=target,
             text=t(test["lang"], "results_sent_early", name=test["name"]),
         )
     return True
@@ -182,11 +202,18 @@ async def cmd_results(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await update.message.reply_text(t(lang, "not_test_creator"))
             return
         if test["status"] == "finished":
-            await update.message.reply_text(t(lang, "test_already_finished"))
+            try:
+                await send_final_results(context, test_id, chat_id=user_id)
+                await update.message.reply_text(t(lang, "results_resent"))
+            except Exception:
+                logger.exception("Failed resend /results for test %s", test_id)
+                await update.message.reply_text(t(lang, "results_send_error"))
             return
 
         try:
-            ok = await finish_test_and_send_results(context, test_id, notify_early=True)
+            ok = await finish_test_and_send_results(
+                context, test_id, notify_early=True, chat_id=user_id
+            )
         except Exception:
             logger.exception("Failed /results for test %s", test_id)
             await update.message.reply_text(t(lang, "results_send_error"))
@@ -200,10 +227,20 @@ async def cmd_results(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(t(lang, "no_active_tests"))
         return
 
+    finished = db.get_finished_tests_by_creator(user_id)
+    if not active and finished:
+        try:
+            await send_final_results(context, finished[0]["id"], chat_id=user_id)
+            await update.message.reply_text(t(lang, "results_resent"))
+        except Exception:
+            logger.exception("Failed resend /results for test %s", finished[0]["id"])
+            await update.message.reply_text(t(lang, "results_send_error"))
+        return
+
     if len(active) == 1:
         try:
             await finish_test_and_send_results(
-                context, active[0]["id"], notify_early=True
+                context, active[0]["id"], notify_early=True, chat_id=user_id
             )
         except Exception:
             logger.exception("Failed /results for test %s", active[0]["id"])
@@ -256,11 +293,18 @@ async def on_results_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.edit_message_text(t(lang, "not_test_creator"))
         return
     if test["status"] == "finished":
-        await query.edit_message_text(t(lang, "test_already_finished"))
+        try:
+            await send_final_results(context, test_id, chat_id=user_id)
+            await query.edit_message_text(t(lang, "results_resent"))
+        except Exception:
+            logger.exception("Failed resend results_now for test %s", test_id)
+            await query.edit_message_text(t(lang, "results_send_error"))
         return
 
     try:
-        ok = await finish_test_and_send_results(context, test_id, notify_early=True)
+        ok = await finish_test_and_send_results(
+            context, test_id, notify_early=True, chat_id=user_id
+        )
     except Exception:
         logger.exception("Failed results_now for test %s", test_id)
         await query.edit_message_text(t(lang, "results_send_error"))

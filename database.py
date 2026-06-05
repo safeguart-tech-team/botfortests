@@ -342,6 +342,19 @@ def get_participants_ranked(test_id: int) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def get_finished_tests_by_creator(creator_id: int) -> list[dict[str, Any]]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM tests
+            WHERE creator_id = ? AND status = 'finished'
+            ORDER BY id DESC
+            """,
+            (creator_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def get_active_tests_by_creator(creator_id: int) -> list[dict[str, Any]]:
     with get_conn() as conn:
         rows = conn.execute(

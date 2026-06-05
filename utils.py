@@ -39,6 +39,30 @@ def format_duration(seconds: int | None, lang: str) -> str:
     return t(lang, "time_format_sec", sec=secs)
 
 
+TG_MESSAGE_LIMIT = 4096
+SAFE_MESSAGE_LIMIT = 3900
+
+
+def split_message(text: str, limit: int = SAFE_MESSAGE_LIMIT) -> list[str]:
+    if len(text) <= limit:
+        return [text]
+
+    parts: list[str] = []
+    chunk: list[str] = []
+    size = 0
+    for line in text.split("\n"):
+        line_len = len(line) + 1
+        if chunk and size + line_len > limit:
+            parts.append("\n".join(chunk))
+            chunk = []
+            size = 0
+        chunk.append(line)
+        size += line_len
+    if chunk:
+        parts.append("\n".join(chunk))
+    return parts
+
+
 def format_results(
     lang: str,
     test_name: str,
@@ -88,4 +112,28 @@ def format_results(
     if interim:
         lines.append("")
         lines.append(t(lang, "interim_results_note"))
-    return "\n".join(lines)
+
+    text = "\n".join(lines)
+    if len(text) > SAFE_MESSAGE_LIMIT:
+        header_lines = lines[:3]
+        body_lines = lines[3:]
+        if interim and body_lines and body_lines[-1].startswith("ℹ"):
+            note = body_lines.pop()
+        else:
+            note = ""
+        kept: list[str] = []
+        omitted = 0
+        for line in body_lines:
+            if line == "":
+                continue
+            candidate = "\n".join(header_lines + kept + [line] + ([note] if note else []))
+            if len(candidate) > SAFE_MESSAGE_LIMIT:
+                omitted += 1
+                continue
+            kept.append(line)
+        if omitted:
+            kept.append(t(lang, "results_truncated", count=omitted))
+        if note:
+            kept.extend(["", note])
+        text = "\n".join(header_lines + kept)
+    return text

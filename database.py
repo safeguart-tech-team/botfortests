@@ -252,6 +252,25 @@ def create_participant(test_id: int, user_id: int, display_name: str) -> int:
         return cur.lastrowid
 
 
+def has_answer(participant_id: int, question_id: int) -> bool:
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT 1 FROM answers
+            WHERE participant_id = ? AND question_id = ?
+            """,
+            (participant_id, question_id),
+        ).fetchone()
+    return row is not None
+
+
+def fill_unanswered_as_wrong(participant_id: int, test_id: int) -> None:
+    """Пропущенные из-за сбоя вопросы считаются неверными."""
+    for q in get_questions(test_id):
+        if not has_answer(participant_id, q["id"]):
+            save_answer(participant_id, q["id"], None, False)
+
+
 def save_answer(
     participant_id: int,
     question_id: int,

@@ -5,12 +5,11 @@ from telegram.error import InvalidToken
 from telegram.ext import Application
 
 from config import BOT_TOKEN, is_valid_bot_token
-from database import finish_test, get_active_tests_past_deadline, get_participants_ranked, init_db
+from database import get_active_tests_past_deadline, init_db
 from handlers.creator import build_creator_handlers
-from handlers.results_cmd import build_results_handlers
+from handlers.results_cmd import build_results_handlers, finish_test_and_send_results
 from handlers.taker import build_taker_handlers
 from handlers.text_router import build_text_handler
-from utils import format_results
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -38,13 +37,10 @@ _TOKEN_HELP = """
 
 async def check_missed_deadlines(context) -> None:
     for test in get_active_tests_past_deadline():
-        test_id = test["id"]
-        finish_test(test_id)
-        participants = get_participants_ranked(test_id)
-        message = format_results(
-            test["lang"], test["name"], participants, test["question_count"]
-        )
-        await context.bot.send_message(chat_id=test["creator_id"], text=message)
+        try:
+            await finish_test_and_send_results(context, test["id"])
+        except Exception:
+            logger.exception("Auto-finish failed for test %s", test["id"])
 
 
 def main() -> None:

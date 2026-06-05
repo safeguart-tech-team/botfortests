@@ -131,8 +131,9 @@ async def _edit_question_message(
             reply_markup=markup,
         )
     except BadRequest as err:
-        if "message is not modified" not in str(err).lower():
-            raise
+        err_l = str(err).lower()
+        if "message is not modified" in err_l or "too many requests" in err_l:
+            return
 
 
 async def start_test_from_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -269,6 +270,7 @@ async def on_fio_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "message_id": None,
             "chat_id": update.effective_chat.id,
             "user_id": user_id,
+            "lock": asyncio.Lock(),
         }
         _active_sessions[user_id] = session
         await _send_question(update, context, session, is_first=True)
@@ -384,6 +386,11 @@ async def _send_question(
         )
 
 
+def _should_refresh_timer(remaining: int) -> bool:
+    """Реже обновляем таймер — меньше нагрузка на Telegram API."""
+    return remaining <= 5 or remaining % 5 == 0
+
+
 async def _countdown_and_timeout(
     context: ContextTypes.DEFAULT_TYPE,
     user_id: int,
@@ -399,12 +406,13 @@ async def _countdown_and_timeout(
 
             if remaining > 0:
                 session["_display_remaining"] = remaining
-                await _edit_question_message(
-                    context,
-                    session,
-                    is_first=session.get("current_is_first", False),
-                    remaining=remaining,
-                )
+                if _should_refresh_timer(remaining):
+                    await _edit_question_message(
+                        context,
+                        session,
+                        is_first=session.get("current_is_first", False),
+                        remaining=remaining,
+                    )
             else:
                 await _handle_timeout(context, user_id, session)
                 return
@@ -412,33 +420,79 @@ async def _countdown_and_timeout(
         return
 
 
+async def _advance_question(
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    session: dict,
+    *,
+    selected_index: int | None,
+    is_correct: bool,
+    update: Update | None = None,
+    edit_in_place: bool = False,
+    show_time_up: bool = False,
+) -> bool:
+    """Сохраняет ответ и переходит к следующему вопросу. False — уже обработан."""
+    async with session["lock"]:
+        if _active_sessions.get(user_id) is not session:
+            return False
+
+        idx = session["index"]
+        if idx >= len(session["questions"]):
+            return False
+
+        q = session["questions"][idx]
+        if db.has_answer(session["participant_id"], q["id"]):
+            _cancel_countdown(session)
+            return False
+
+        _cancel_countdown(session)
+        db.save_answer(session["participant_id"], q["id"], selected_index, is_correct)
+        session["index"] += 1
+        finished = session["index"] >= len(session["questions"])
+
+    lang = session["lang"]
+
+    if show_time_up:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=session["chat_id"],
+                message_id=session["message_id"],
+                text=t(lang, "time_up"),
+            )
+        except BadRequest:
+            pass
+    elif update and update.callback_query:
+        try:
+            await update.callback_query.message.edit_reply_markup(reply_markup=None)
+        except BadRequest:
+            pass
+
+    if finished:
+        await _finish_test(context, user_id, session)
+    else:
+        await _send_question(
+            update if not show_time_up else None,
+            context,
+            session,
+            is_first=False,
+            edit_in_place=edit_in_place and not show_time_up,
+        )
+    return True
+
+
 async def _handle_timeout(
     context: ContextTypes.DEFAULT_TYPE,
     user_id: int,
     session: dict,
 ) -> None:
-    _cancel_countdown(session)
-
-    idx = session["index"]
-    q = session["questions"][idx]
-    lang = session["lang"]
-
-    db.save_answer(session["participant_id"], q["id"], None, False)
-
-    try:
-        await context.bot.edit_message_text(
-            chat_id=session["chat_id"],
-            message_id=session["message_id"],
-            text=t(lang, "time_up"),
-        )
-    except BadRequest:
-        pass
-
-    session["index"] += 1
-    if session["index"] >= len(session["questions"]):
-        await _finish_test(context, user_id, session)
-    else:
-        await _send_question(None, context, session)
+    await _advance_question(
+        context,
+        user_id,
+        session,
+        selected_index=None,
+        is_correct=False,
+        show_time_up=True,
+    )
 
 
 async def on_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -448,8 +502,6 @@ async def on_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if not session or not query.data.startswith("ans_"):
         return
-
-    _cancel_countdown(session)
 
     test = db.get_test(session["test_id"])
     if not test or test["status"] != "active":
@@ -464,26 +516,21 @@ async def on_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     selected = int(query.data.replace("ans_", ""))
     idx = session["index"]
+    if idx >= len(session["questions"]):
+        return
+
     q = session["questions"][idx]
     is_correct = selected == q["correct_index"]
 
-    db.save_answer(session["participant_id"], q["id"], selected, is_correct)
-
-    session["index"] += 1
-    if session["index"] >= len(session["questions"]):
-        try:
-            await query.message.edit_reply_markup(reply_markup=None)
-        except BadRequest:
-            pass
-        await _finish_test(context, user_id, session)
-    else:
-        await _send_question(
-            update,
-            context,
-            session,
-            is_first=False,
-            edit_in_place=True,
-        )
+    await _advance_question(
+        context,
+        user_id,
+        session,
+        selected_index=selected,
+        is_correct=is_correct,
+        update=update,
+        edit_in_place=True,
+    )
 
 
 async def _finish_test(
@@ -493,6 +540,7 @@ async def _finish_test(
 ) -> None:
     _cancel_countdown(session)
     lang = session["lang"]
+    db.fill_unanswered_as_wrong(session["participant_id"], session["test_id"])
     db.finish_participant(session["participant_id"])
     _active_sessions.pop(user_id, None)
 

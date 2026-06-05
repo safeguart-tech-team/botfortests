@@ -223,18 +223,18 @@ async def cmd_results(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     active = db.get_active_tests_by_creator(user_id)
-    if not active:
-        await update.message.reply_text(t(lang, "no_active_tests"))
-        return
-
     finished = db.get_finished_tests_by_creator(user_id)
-    if not active and finished:
-        try:
-            await send_final_results(context, finished[0]["id"], chat_id=user_id)
-            await update.message.reply_text(t(lang, "results_resent"))
-        except Exception:
-            logger.exception("Failed resend /results for test %s", finished[0]["id"])
-            await update.message.reply_text(t(lang, "results_send_error"))
+
+    if not active:
+        if finished:
+            try:
+                await send_final_results(context, finished[0]["id"], chat_id=user_id)
+                await update.message.reply_text(t(lang, "results_resent"))
+            except Exception:
+                logger.exception("Failed resend /results for test %s", finished[0]["id"])
+                await update.message.reply_text(t(lang, "results_send_error"))
+            return
+        await update.message.reply_text(t(lang, "no_active_tests"))
         return
 
     if len(active) == 1:

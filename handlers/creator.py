@@ -1,4 +1,7 @@
+import logging
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     ApplicationHandlerStop,
     CallbackQueryHandler,
@@ -17,6 +20,8 @@ from question_parser import (
     parse_questions_bulk,
 )
 from utils import split_message, test_deep_link
+
+logger = logging.getLogger(__name__)
 
 
 def _lang_keyboard() -> InlineKeyboardMarkup:
@@ -101,6 +106,25 @@ def _parse_error_hint(lang: str, code: str, kwargs: dict) -> str:
     return t(lang, code, **kwargs) + "\n\n" + t(lang, "questions_continue_hint")
 
 
+async def _send_user(
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    text: str,
+    *,
+    reply_markup=None,
+) -> None:
+    await context.bot.send_message(
+        chat_id=user_id, text=text, reply_markup=reply_markup
+    )
+
+
+async def _safe_answer(query, text: str | None = None, *, show_alert: bool = False) -> None:
+    try:
+        await query.answer(text=text, show_alert=show_alert)
+    except BadRequest:
+        pass
+
+
 async def _finalize_questions(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -108,19 +132,18 @@ async def _finalize_questions(
     from_callback: bool = False,
 ) -> None:
     lang = _lang(context)
+    user_id = update.effective_user.id
     combined = _combined_questions_text(context)
     result = parse_questions_bulk(combined, allow_incomplete_last=False)
 
-    reply = (
-        update.callback_query.message.reply_text
-        if from_callback and update.callback_query
-        else update.effective_message.reply_text
-    )
-
     if result.error:
-        await reply(_parse_error_hint(lang, result.error.code, result.error.kwargs))
+        await _send_user(
+            context, user_id, _parse_error_hint(lang, result.error.code, result.error.kwargs)
+        )
         soft = parse_questions_bulk(combined, allow_incomplete_last=True)
-        await reply(
+        await _send_user(
+            context,
+            user_id,
             t(lang, "questions_waiting_more", count=len(soft.questions)),
             reply_markup=_questions_done_keyboard(lang),
         )
@@ -130,7 +153,7 @@ async def _finalize_questions(
     try:
         test_id = await db.run_async(
             db.create_test,
-            update.effective_user.id,
+            user_id,
             context.user_data["test_name"],
             lang,
             len(questions),
@@ -146,7 +169,8 @@ async def _finalize_questions(
                 q.correct_index,
             )
     except Exception:
-        await reply(t(lang, "questions_save_error"))
+        logger.exception("Failed to save questions for user %s", user_id)
+        await _send_user(context, user_id, t(lang, "questions_save_error"))
         return
 
     context.user_data["test_id"] = test_id
@@ -157,8 +181,10 @@ async def _finalize_questions(
     preview = format_questions_preview(questions)
     accepted = t(lang, "questions_accepted", count=len(questions))
     for part in split_message(f"{accepted}\n\n{preview}"):
-        await reply(part)
-    await reply(
+        await _send_user(context, user_id, part)
+    await _send_user(
+        context,
+        user_id,
         t(lang, "choose_results_delay"),
         reply_markup=_delay_keyboard(lang),
     )
@@ -188,79 +214,101 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def on_create_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
+    user_id = update.effective_user.id
     step = context.user_data.get("create_step")
-    if not step:
-        return
+    data = query.data or ""
+    lang = _lang(context)
 
-    data = query.data
-
-    if data.startswith("lang_"):
-        if step != "lang":
+    try:
+        if data.startswith("lang_"):
+            if step not in (None, "lang"):
+                await _safe_answer(query, t(lang, "session_restart"), show_alert=True)
+                return
+            await _safe_answer(query)
+            chosen = "ru" if data == "lang_ru" else "uz"
+            await db.run_async(db.set_user_lang, user_id, chosen)
+            _clear_participant_wait(context)
+            context.user_data["lang"] = chosen
+            context.user_data["create_step"] = "test_name"
+            await _send_user(context, user_id, t(chosen, "enter_test_name"))
             return
-        await query.answer()
-        lang = "ru" if data == "lang_ru" else "uz"
-        await db.run_async(db.set_user_lang, update.effective_user.id, lang)
-        _clear_participant_wait(context)
-        context.user_data["lang"] = lang
-        context.user_data["create_step"] = "test_name"
-        await query.message.reply_text(t(lang, "enter_test_name"))
-        return
 
-    if data.startswith("time_"):
-        if step != "time":
+        if data.startswith("time_"):
+            # Допускаем продолжение, если название уже есть (после рестарта/старой кнопки)
+            if step != "time" and not context.user_data.get("test_name"):
+                await _safe_answer(query, t(lang, "session_restart"), show_alert=True)
+                return
+            await _safe_answer(query)
+            key = data.replace("time_", "")
+            if key not in TIME_OPTIONS:
+                await _send_user(context, user_id, t(lang, "session_restart"))
+                return
+            context.user_data["time_per_question"] = TIME_OPTIONS[key]
+            context.user_data["questions_chunks"] = []
+            context.user_data["create_step"] = "questions_bulk"
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except BadRequest:
+                pass
+            await _send_user(context, user_id, t(lang, "enter_questions_bulk"))
             return
-        await query.answer()
-        lang = _lang(context)
-        key = data.replace("time_", "")
-        context.user_data["time_per_question"] = TIME_OPTIONS[key]
-        context.user_data["questions_chunks"] = []
-        context.user_data["create_step"] = "questions_bulk"
-        await query.message.reply_text(t(lang, "enter_questions_bulk"))
-        return
 
-    if data == "questions_done":
-        if step != "questions_bulk":
+        if data == "questions_done":
+            if step != "questions_bulk":
+                await _safe_answer(query, t(lang, "session_restart"), show_alert=True)
+                return
+            await _safe_answer(query)
+            await _finalize_questions(update, context, from_callback=True)
             return
-        await query.answer()
-        await _finalize_questions(update, context, from_callback=True)
-        return
 
-    if data.startswith("delay_"):
-        if step != "results_delay":
-            return
-        await query.answer()
-        lang = _lang(context)
-        delay_key = data.replace("delay_", "")
-        delay_sec = RESULTS_DELAY_OPTIONS[delay_key]
+        if data.startswith("delay_"):
+            if step != "results_delay" or not context.user_data.get("test_id"):
+                await _safe_answer(query, t(lang, "session_restart"), show_alert=True)
+                return
+            await _safe_answer(query)
+            delay_key = data.replace("delay_", "")
+            if delay_key not in RESULTS_DELAY_OPTIONS:
+                await _send_user(context, user_id, t(lang, "session_restart"))
+                return
+            delay_sec = RESULTS_DELAY_OPTIONS[delay_key]
 
-        test_id = context.user_data["test_id"]
-        await db.run_async(db.set_results_delay, test_id, delay_sec)
-        await db.run_async(db.activate_test, test_id)
+            test_id = context.user_data["test_id"]
+            await db.run_async(db.set_results_delay, test_id, delay_sec)
+            await db.run_async(db.activate_test, test_id)
 
-        me = await context.bot.get_me()
-        link = test_deep_link(me.username, test_id)
-        name = context.user_data["test_name"]
+            me = await context.bot.get_me()
+            link = test_deep_link(me.username, test_id)
+            name = context.user_data["test_name"]
 
-        if delay_sec <= 0:
-            ready_text = t(lang, "test_ready_manual", name=name)
-        else:
-            ready_text = t(lang, "test_ready", name=name)
+            if delay_sec <= 0:
+                ready_text = t(lang, "test_ready_manual", name=name)
+            else:
+                ready_text = t(lang, "test_ready", name=name)
 
-        await query.message.reply_text(ready_text)
-        await context.bot.send_message(
-            chat_id=update.effective_user.id,
-            text=t(lang, "test_link_text", name=name, link=link),
-        )
-
-        if delay_sec > 0:
-            context.job_queue.run_once(
-                send_results_job,
-                when=delay_sec,
-                data={"test_id": test_id},
-                name=f"results_{test_id}",
+            await _send_user(context, user_id, ready_text)
+            await _send_user(
+                context, user_id, t(lang, "test_link_text", name=name, link=link)
             )
 
-        _clear_create(context)
+            if delay_sec > 0:
+                context.job_queue.run_once(
+                    send_results_job,
+                    when=delay_sec,
+                    data={"test_id": test_id},
+                    name=f"results_{test_id}",
+                )
+
+            _clear_create(context)
+            return
+
+        await _safe_answer(query)
+    except TelegramError:
+        logger.exception("Create callback failed for user %s data=%s", user_id, data)
+        await _safe_answer(query, t(lang, "callback_error"), show_alert=True)
+        try:
+            await _send_user(context, user_id, t(lang, "session_restart"))
+        except TelegramError:
+            pass
 
 
 async def on_create_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -294,7 +342,6 @@ async def on_create_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         result = parse_questions_bulk(combined, allow_incomplete_last=True)
 
         if result.error:
-            # Откатываем последний кусок — он ломает уже собранное
             chunks.pop()
             await update.message.reply_text(
                 _parse_error_hint(lang, result.error.code, result.error.kwargs)

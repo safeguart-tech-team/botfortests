@@ -87,7 +87,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    lang = context.user_data.get("lang") or db.get_user_lang(update.effective_user.id)
+    lang = context.user_data.get("lang") or await db.run_async(
+        db.get_user_lang, update.effective_user.id
+    )
     _clear_create(context)
     await update.message.reply_text(t(lang, "cancelled"))
 
@@ -105,7 +107,7 @@ async def on_create_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
         await query.answer()
         lang = "ru" if data == "lang_ru" else "uz"
-        db.set_user_lang(update.effective_user.id, lang)
+        await db.run_async(db.set_user_lang, update.effective_user.id, lang)
         _clear_participant_wait(context)
         context.user_data["lang"] = lang
         context.user_data["create_step"] = "test_name"
@@ -120,12 +122,13 @@ async def on_create_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         key = data.replace("time_", "")
         context.user_data["time_per_question"] = TIME_OPTIONS[key]
 
-        test_id = db.create_test(
-            creator_id=update.effective_user.id,
-            name=context.user_data["test_name"],
-            lang=lang,
-            question_count=context.user_data["question_count"],
-            time_per_question=context.user_data["time_per_question"],
+        test_id = await db.run_async(
+            db.create_test,
+            update.effective_user.id,
+            context.user_data["test_name"],
+            lang,
+            context.user_data["question_count"],
+            context.user_data["time_per_question"],
         )
         context.user_data["test_id"] = test_id
         context.user_data["create_step"] = "question_text"
@@ -143,12 +146,13 @@ async def on_create_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         correct_index = int(data.replace("correct_", ""))
 
         n = context.user_data["current_q"]
-        db.add_question(
-            test_id=context.user_data["test_id"],
-            number=n,
-            text=context.user_data["current_question_text"],
-            options=context.user_data["current_options"],
-            correct_index=correct_index,
+        await db.run_async(
+            db.add_question,
+            context.user_data["test_id"],
+            n,
+            context.user_data["current_question_text"],
+            context.user_data["current_options"],
+            correct_index,
         )
 
         total = context.user_data["question_count"]
@@ -174,8 +178,8 @@ async def on_create_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         delay_sec = RESULTS_DELAY_OPTIONS[delay_key]
 
         test_id = context.user_data["test_id"]
-        db.set_results_delay(test_id, delay_sec)
-        db.activate_test(test_id)
+        await db.run_async(db.set_results_delay, test_id, delay_sec)
+        await db.run_async(db.activate_test, test_id)
 
         me = await context.bot.get_me()
         link = test_deep_link(me.username, test_id)

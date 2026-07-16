@@ -51,6 +51,15 @@ def split_message(text: str, limit: int = SAFE_MESSAGE_LIMIT) -> list[str]:
     chunk: list[str] = []
     size = 0
     for line in text.split("\n"):
+        # Слишком длинная строка (редкий случай) — режем принудительно
+        while len(line) > limit:
+            if chunk:
+                parts.append("\n".join(chunk))
+                chunk = []
+                size = 0
+            parts.append(line[:limit])
+            line = line[limit:]
+
         line_len = len(line) + 1
         if chunk and size + line_len > limit:
             parts.append("\n".join(chunk))

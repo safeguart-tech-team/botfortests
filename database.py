@@ -1,10 +1,18 @@
+import asyncio
 import json
 import sqlite3
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any
+from functools import partial
+from typing import Any, Callable, TypeVar
 
 from config import DB_PATH
+
+T = TypeVar("T")
+
+_BUSY_RETRIES = 8
+_BUSY_SLEEP_SEC = 0.05
 
 
 def _utcnow() -> str:
@@ -15,16 +23,48 @@ def ensure_db_directory() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
+def _configure_connection(conn: sqlite3.Connection) -> None:
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+
+
 @contextmanager
 def get_conn():
     ensure_db_directory()
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
+    conn = sqlite3.connect(str(DB_PATH), timeout=5.0, check_same_thread=False)
     try:
+        _configure_connection(conn)
         yield conn
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
+
+
+def _with_busy_retry(operation: Callable[[], T]) -> T:
+    last_err: Exception | None = None
+    for attempt in range(_BUSY_RETRIES):
+        try:
+            return operation()
+        except sqlite3.OperationalError as err:
+            last_err = err
+            if "locked" not in str(err).lower() or attempt == _BUSY_RETRIES - 1:
+                raise
+            time.sleep(_BUSY_SLEEP_SEC * (attempt + 1))
+    assert last_err is not None
+    raise last_err
+
+
+async def run_async(func: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
+    """Выполняет синхронный вызов БД в пуле потоков, не блокируя event loop."""
+    if kwargs:
+        return await asyncio.to_thread(partial(func, *args, **kwargs))
+    return await asyncio.to_thread(func, *args)
 
 
 def init_db() -> None:
@@ -82,6 +122,7 @@ def init_db() -> None:
             """
         )
         _migrate_participants(conn)
+        _migrate_indexes(conn)
 
 
 def _parse_utc(iso: str) -> datetime:
@@ -97,6 +138,37 @@ def _migrate_participants(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE participants ADD COLUMN started_at TEXT")
     if "duration_sec" not in cols:
         conn.execute("ALTER TABLE participants ADD COLUMN duration_sec INTEGER")
+
+
+def _migrate_indexes(conn: sqlite3.Connection) -> None:
+    # Удаляем возможные дубликаты ответов перед уникальным индексом
+    conn.execute(
+        """
+        DELETE FROM answers
+        WHERE id NOT IN (
+            SELECT MIN(id) FROM answers
+            GROUP BY participant_id, question_id
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_answers_participant_question
+        ON answers(participant_id, question_id)
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_participants_test ON participants(test_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_questions_test ON questions(test_id)"
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_participants_test_finished
+        ON participants(test_id, finished_at)
+        """
+    )
 
 
 def _duration_seconds(started_at: str | None, finished_at: str | None) -> int | None:
@@ -241,15 +313,18 @@ def reset_incomplete_participation(test_id: int, user_id: int) -> None:
 
 
 def create_participant(test_id: int, user_id: int, display_name: str) -> int:
-    with get_conn() as conn:
-        cur = conn.execute(
-            """
-            INSERT INTO participants (test_id, user_id, display_name, score, started_at)
-            VALUES (?, ?, ?, 0, ?)
-            """,
-            (test_id, user_id, display_name, _utcnow()),
-        )
-        return cur.lastrowid
+    def _op() -> int:
+        with get_conn() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO participants (test_id, user_id, display_name, score, started_at)
+                VALUES (?, ?, ?, 0, ?)
+                """,
+                (test_id, user_id, display_name, _utcnow()),
+            )
+            return cur.lastrowid
+
+    return _with_busy_retry(_op)
 
 
 def has_answer(participant_id: int, question_id: int) -> bool:
@@ -265,10 +340,52 @@ def has_answer(participant_id: int, question_id: int) -> bool:
 
 
 def fill_unanswered_as_wrong(participant_id: int, test_id: int) -> None:
-    """Пропущенные из-за сбоя вопросы считаются неверными."""
-    for q in get_questions(test_id):
-        if not has_answer(participant_id, q["id"]):
-            save_answer(participant_id, q["id"], None, False)
+    """Пропущенные вопросы считаются неверными — одним запросом."""
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO answers
+                (participant_id, question_id, selected_index, is_correct)
+            SELECT ?, q.id, NULL, 0
+            FROM questions q
+            WHERE q.test_id = ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM answers a
+                  WHERE a.participant_id = ? AND a.question_id = q.id
+              )
+            """,
+            (participant_id, test_id, participant_id),
+        )
+
+
+def try_save_answer(
+    participant_id: int,
+    question_id: int,
+    selected_index: int | None,
+    is_correct: bool,
+) -> bool:
+    """Сохраняет ответ атомарно. False — если ответ уже был."""
+
+    def _op() -> bool:
+        with get_conn() as conn:
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO answers (participant_id, question_id, selected_index, is_correct)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (participant_id, question_id, selected_index, int(is_correct)),
+                )
+            except sqlite3.IntegrityError:
+                return False
+            if is_correct:
+                conn.execute(
+                    "UPDATE participants SET score = score + 1 WHERE id = ?",
+                    (participant_id,),
+                )
+            return True
+
+    return _with_busy_retry(_op)
 
 
 def save_answer(
@@ -277,19 +394,7 @@ def save_answer(
     selected_index: int | None,
     is_correct: bool,
 ) -> None:
-    with get_conn() as conn:
-        conn.execute(
-            """
-            INSERT INTO answers (participant_id, question_id, selected_index, is_correct)
-            VALUES (?, ?, ?, ?)
-            """,
-            (participant_id, question_id, selected_index, int(is_correct)),
-        )
-        if is_correct:
-            conn.execute(
-                "UPDATE participants SET score = score + 1 WHERE id = ?",
-                (participant_id,),
-            )
+    try_save_answer(participant_id, question_id, selected_index, is_correct)
 
 
 def finish_participant(participant_id: int) -> None:
@@ -304,10 +409,56 @@ def finish_participant(participant_id: int) -> None:
             """
             UPDATE participants
             SET finished_at = ?, duration_sec = ?
-            WHERE id = ?
+            WHERE id = ? AND finished_at IS NULL
             """,
             (finished_at, duration_sec, participant_id),
         )
+
+
+def finalize_incomplete_participants(test_id: int) -> int:
+    """Закрывает незавершённые прохождения перед выдачей результатов."""
+
+    def _op() -> int:
+        finished_at = _utcnow()
+        with get_conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, started_at FROM participants
+                WHERE test_id = ? AND finished_at IS NULL
+                """,
+                (test_id,),
+            ).fetchall()
+            if not rows:
+                return 0
+
+            for row in rows:
+                pid = row["id"]
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO answers
+                        (participant_id, question_id, selected_index, is_correct)
+                    SELECT ?, q.id, NULL, 0
+                    FROM questions q
+                    WHERE q.test_id = ?
+                      AND NOT EXISTS (
+                          SELECT 1 FROM answers a
+                          WHERE a.participant_id = ? AND a.question_id = q.id
+                      )
+                    """,
+                    (pid, test_id, pid),
+                )
+                duration_sec = _duration_seconds(row["started_at"], finished_at)
+                conn.execute(
+                    """
+                    UPDATE participants
+                    SET finished_at = ?, duration_sec = ?
+                    WHERE id = ? AND finished_at IS NULL
+                    """,
+                    (finished_at, duration_sec, pid),
+                )
+            return len(rows)
+
+    return _with_busy_retry(_op)
 
 
 def count_participants(test_id: int) -> tuple[int, int]:

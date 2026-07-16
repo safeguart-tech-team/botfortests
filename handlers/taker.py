@@ -3,13 +3,11 @@ import logging
 import re
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.error import BadRequest
+from telegram.error import BadRequest, RetryAfter, TimedOut
 from telegram.ext import (
     ApplicationHandlerStop,
     CallbackQueryHandler,
     ContextTypes,
-    MessageHandler,
-    filters,
 )
 
 import database as db
@@ -19,6 +17,7 @@ from utils import option_label
 logger = logging.getLogger(__name__)
 
 _active_sessions: dict[int, dict] = {}
+
 FIO_MIN_LEN = 5
 FIO_MIN_WORDS = 2
 FIO_MAX_LEN = 120
@@ -109,8 +108,52 @@ def _clear_user_session(user_id: int) -> None:
         _cancel_countdown(session)
 
 
+def clear_sessions_for_test(test_id: int) -> int:
+    """Снимает активные сессии теста (при /results или авто-таймере)."""
+    to_remove = [
+        uid for uid, s in list(_active_sessions.items()) if s.get("test_id") == test_id
+    ]
+    for uid in to_remove:
+        _clear_user_session(uid)
+    return len(to_remove)
+
+
 def _clear_fio_wait(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("awaiting_fio_test_id", None)
+
+
+async def _safe_edit_text(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    message_id: int,
+    text: str,
+    reply_markup=None,
+) -> None:
+    try:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            reply_markup=reply_markup,
+        )
+    except RetryAfter as err:
+        await asyncio.sleep(float(err.retry_after) + 0.1)
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
+                reply_markup=reply_markup,
+            )
+        except (BadRequest, RetryAfter, TimedOut):
+            return
+    except BadRequest as err:
+        err_l = str(err).lower()
+        if "message is not modified" in err_l or "too many requests" in err_l:
+            return
+    except TimedOut:
+        return
 
 
 async def _edit_question_message(
@@ -123,17 +166,13 @@ async def _edit_question_message(
     text = _question_text(session, is_first=is_first, remaining=remaining)
     q = session["questions"][session["index"]]
     markup = _options_keyboard(len(q["options"]))
-    try:
-        await context.bot.edit_message_text(
-            chat_id=session["chat_id"],
-            message_id=session["message_id"],
-            text=text,
-            reply_markup=markup,
-        )
-    except BadRequest as err:
-        err_l = str(err).lower()
-        if "message is not modified" in err_l or "too many requests" in err_l:
-            return
+    await _safe_edit_text(
+        context,
+        chat_id=session["chat_id"],
+        message_id=session["message_id"],
+        text=text,
+        reply_markup=markup,
+    )
 
 
 async def start_test_from_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -147,18 +186,18 @@ async def start_test_from_link(update: Update, context: ContextTypes.DEFAULT_TYP
         return False
 
     user = update.effective_user
-    test = db.get_test(test_id)
-    lang = test["lang"] if test else db.get_user_lang(user.id)
+    test = await db.run_async(db.get_test, test_id)
+    lang = test["lang"] if test else await db.run_async(db.get_user_lang, user.id)
 
     if not test or test["status"] != "active":
         await update.message.reply_text(t(lang, "test_not_found"))
         return True
 
-    if db.has_completed_participation(test_id, user.id):
+    if await db.run_async(db.has_completed_participation, test_id, user.id):
         await update.message.reply_text(t(lang, "already_participated"))
         return True
 
-    questions = db.get_questions(test_id)
+    questions = await db.run_async(db.get_questions, test_id)
     if not questions:
         await update.message.reply_text(t(lang, "questions_missing"))
         return True
@@ -186,20 +225,20 @@ async def on_begin_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await query.answer()
         return
 
-    test = db.get_test(test_id)
-    lang = test["lang"] if test else db.get_user_lang(user_id)
+    test = await db.run_async(db.get_test, test_id)
+    lang = test["lang"] if test else await db.run_async(db.get_user_lang, user_id)
 
     if not test or test["status"] != "active":
         await query.answer()
         await query.message.reply_text(t(lang, "test_not_found"))
         return
 
-    if db.has_completed_participation(test_id, user_id):
+    if await db.run_async(db.has_completed_participation, test_id, user_id):
         await query.answer()
         await query.message.reply_text(t(lang, "already_participated"))
         return
 
-    questions = db.get_questions(test_id)
+    questions = await db.run_async(db.get_questions, test_id)
     if not questions:
         await query.answer()
         await query.message.reply_text(t(lang, "questions_missing"))
@@ -208,7 +247,7 @@ async def on_begin_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await query.answer()
 
     _clear_user_session(user_id)
-    db.reset_incomplete_participation(test_id, user_id)
+    await db.run_async(db.reset_incomplete_participation, test_id, user_id)
 
     try:
         await query.edit_message_reply_markup(reply_markup=None)
@@ -229,15 +268,15 @@ async def on_fio_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     user_id = update.effective_user.id
-    test = db.get_test(test_id)
-    lang = test["lang"] if test else db.get_user_lang(user_id)
+    test = await db.run_async(db.get_test, test_id)
+    lang = test["lang"] if test else await db.run_async(db.get_user_lang, user_id)
 
     if not test or test["status"] != "active":
         _clear_fio_wait(context)
         await update.message.reply_text(t(lang, "test_not_found"))
         raise ApplicationHandlerStop
 
-    if db.has_completed_participation(test_id, user_id):
+    if await db.run_async(db.has_completed_participation, test_id, user_id):
         _clear_fio_wait(context)
         await update.message.reply_text(t(lang, "already_participated"))
         raise ApplicationHandlerStop
@@ -247,7 +286,7 @@ async def on_fio_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(t(lang, "invalid_full_name"))
         raise ApplicationHandlerStop
 
-    questions = db.get_questions(test_id)
+    questions = await db.run_async(db.get_questions, test_id)
     if not questions:
         _clear_fio_wait(context)
         await update.message.reply_text(t(lang, "questions_missing"))
@@ -255,10 +294,10 @@ async def on_fio_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     _clear_fio_wait(context)
     _clear_user_session(user_id)
-    db.reset_incomplete_participation(test_id, user_id)
+    await db.run_async(db.reset_incomplete_participation, test_id, user_id)
 
     try:
-        participant_id = db.create_participant(test_id, user_id, fio)
+        participant_id = await db.run_async(db.create_participant, test_id, user_id, fio)
         session = {
             "test_id": test_id,
             "participant_id": participant_id,
@@ -271,13 +310,14 @@ async def on_fio_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "chat_id": update.effective_chat.id,
             "user_id": user_id,
             "lock": asyncio.Lock(),
+            "answered_ids": set(),
         }
         _active_sessions[user_id] = session
         await _send_question(update, context, session, is_first=True)
     except Exception:
         logger.exception("Failed to start test %s for user %s after FIO", test_id, user_id)
         _clear_user_session(user_id)
-        db.reset_incomplete_participation(test_id, user_id)
+        await db.run_async(db.reset_incomplete_participation, test_id, user_id)
         await update.message.reply_text(t(lang, "test_start_error"))
 
     raise ApplicationHandlerStop
@@ -302,6 +342,12 @@ async def _deliver_question(
             msg = await context.bot.send_message(
                 chat_id=chat_id, text=text, reply_markup=markup
             )
+        return msg.message_id
+    except RetryAfter as err:
+        await asyncio.sleep(float(err.retry_after) + 0.1)
+        msg = await context.bot.send_message(
+            chat_id=chat_id, text=text, reply_markup=markup
+        )
         return msg.message_id
     except BadRequest as err:
         if "too long" not in str(err).lower():
@@ -387,8 +433,10 @@ async def _send_question(
 
 
 def _should_refresh_timer(remaining: int) -> bool:
-    """Реже обновляем таймер — меньше нагрузка на Telegram API."""
-    return remaining <= 5 or remaining % 5 == 0
+    """Редкие обновления таймера — критично при 100+ одновременных пользователях."""
+    if remaining <= 3:
+        return True
+    return remaining in (15, 10, 5)
 
 
 async def _countdown_and_timeout(
@@ -441,30 +489,39 @@ async def _advance_question(
             return False
 
         q = session["questions"][idx]
-        if db.has_answer(session["participant_id"], q["id"]):
+        answered_ids = session.setdefault("answered_ids", set())
+        if q["id"] in answered_ids:
             _cancel_countdown(session)
             return False
 
         _cancel_countdown(session)
-        db.save_answer(session["participant_id"], q["id"], selected_index, is_correct)
+        saved = await db.run_async(
+            db.try_save_answer,
+            session["participant_id"],
+            q["id"],
+            selected_index,
+            is_correct,
+        )
+        if not saved:
+            return False
+
+        answered_ids.add(q["id"])
         session["index"] += 1
         finished = session["index"] >= len(session["questions"])
 
     lang = session["lang"]
 
     if show_time_up:
-        try:
-            await context.bot.edit_message_text(
-                chat_id=session["chat_id"],
-                message_id=session["message_id"],
-                text=t(lang, "time_up"),
-            )
-        except BadRequest:
-            pass
+        await _safe_edit_text(
+            context,
+            chat_id=session["chat_id"],
+            message_id=session["message_id"],
+            text=t(lang, "time_up"),
+        )
     elif update and update.callback_query:
         try:
             await update.callback_query.message.edit_reply_markup(reply_markup=None)
-        except BadRequest:
+        except (BadRequest, RetryAfter, TimedOut):
             pass
 
     if finished:
@@ -503,7 +560,7 @@ async def on_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not session or not query.data.startswith("ans_"):
         return
 
-    test = db.get_test(session["test_id"])
+    test = await db.run_async(db.get_test, session["test_id"])
     if not test or test["status"] != "active":
         await query.answer()
         lang = session["lang"]
@@ -540,14 +597,25 @@ async def _finish_test(
 ) -> None:
     _cancel_countdown(session)
     lang = session["lang"]
-    db.fill_unanswered_as_wrong(session["participant_id"], session["test_id"])
-    db.finish_participant(session["participant_id"])
+    await db.run_async(
+        db.fill_unanswered_as_wrong, session["participant_id"], session["test_id"]
+    )
+    await db.run_async(db.finish_participant, session["participant_id"])
     _active_sessions.pop(user_id, None)
 
-    await context.bot.send_message(
-        chat_id=session["chat_id"],
-        text=t(lang, "test_complete_participant"),
-    )
+    try:
+        await context.bot.send_message(
+            chat_id=session["chat_id"],
+            text=t(lang, "test_complete_participant"),
+        )
+    except RetryAfter as err:
+        await asyncio.sleep(float(err.retry_after) + 0.1)
+        await context.bot.send_message(
+            chat_id=session["chat_id"],
+            text=t(lang, "test_complete_participant"),
+        )
+    except TimedOut:
+        logger.warning("Timeout sending completion to user %s", user_id)
 
 
 async def on_taker_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

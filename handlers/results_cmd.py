@@ -1,13 +1,19 @@
+import asyncio
 import logging
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import RetryAfter, TimedOut
 from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
 
 import database as db
+from handlers.taker import clear_sessions_for_test
 from locales import t
 from utils import format_results, split_message
 
 logger = logging.getLogger(__name__)
+
+# Пауза между частями длинного рейтинга (100+ человек)
+_RESULTS_PART_DELAY = 0.07
 
 
 def _cancel_results_job(job_queue, test_id: int) -> None:
@@ -17,23 +23,37 @@ def _cancel_results_job(job_queue, test_id: int) -> None:
         job.schedule_removal()
 
 
+async def _send_parts(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str) -> None:
+    parts = split_message(text)
+    for i, part in enumerate(parts):
+        if i:
+            await asyncio.sleep(_RESULTS_PART_DELAY)
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=part)
+        except RetryAfter as err:
+            await asyncio.sleep(float(err.retry_after) + 0.2)
+            await context.bot.send_message(chat_id=chat_id, text=part)
+        except TimedOut:
+            await asyncio.sleep(0.5)
+            await context.bot.send_message(chat_id=chat_id, text=part)
+
+
 async def send_final_results(
     context: ContextTypes.DEFAULT_TYPE,
     test_id: int,
     *,
     chat_id: int | None = None,
 ) -> None:
-    test = db.get_test(test_id)
+    test = await db.run_async(db.get_test, test_id)
     if not test:
         return
 
-    participants = db.get_participants_ranked(test_id)
+    participants = await db.run_async(db.get_participants_ranked, test_id)
     message = format_results(
         test["lang"], test["name"], participants, test["question_count"]
     )
     target = chat_id if chat_id is not None else test["creator_id"]
-    for part in split_message(message):
-        await context.bot.send_message(chat_id=target, text=part)
+    await _send_parts(context, target, message)
 
 
 async def finish_test_and_send_results(
@@ -43,7 +63,7 @@ async def finish_test_and_send_results(
     notify_early: bool = False,
     chat_id: int | None = None,
 ) -> bool:
-    test = db.get_test(test_id)
+    test = await db.run_async(db.get_test, test_id)
     if not test:
         return False
 
@@ -51,17 +71,26 @@ async def finish_test_and_send_results(
         await send_final_results(context, test_id, chat_id=chat_id)
         return True
 
+    # Закрываем незавершённые прохождения, чтобы все попали в рейтинг
+    closed = await db.run_async(db.finalize_incomplete_participants, test_id)
+    if closed:
+        logger.info("Finalized %s incomplete participants for test %s", closed, test_id)
+    clear_sessions_for_test(test_id)
+
     await send_final_results(context, test_id, chat_id=chat_id)
 
-    db.finish_test(test_id)
+    await db.run_async(db.finish_test, test_id)
     _cancel_results_job(context.job_queue, test_id)
 
     if notify_early:
         target = chat_id if chat_id is not None else test["creator_id"]
-        await context.bot.send_message(
-            chat_id=target,
-            text=t(test["lang"], "results_sent_early", name=test["name"]),
-        )
+        try:
+            await context.bot.send_message(
+                chat_id=target,
+                text=t(test["lang"], "results_sent_early", name=test["name"]),
+            )
+        except (RetryAfter, TimedOut):
+            logger.warning("Could not send early-results notice for test %s", test_id)
     return True
 
 
@@ -71,12 +100,12 @@ async def send_progress_summary(
     *,
     chat_id: int,
 ) -> None:
-    test = db.get_test(test_id)
+    test = await db.run_async(db.get_test, test_id)
     if not test:
         return
 
     lang = test["lang"]
-    started, finished = db.count_participants(test_id)
+    started, finished = await db.run_async(db.count_participants, test_id)
     in_progress = max(started - finished, 0)
     text = t(
         lang,
@@ -95,24 +124,23 @@ async def send_interim_results(
     *,
     chat_id: int | None = None,
 ) -> bool:
-    test = db.get_test(test_id)
+    test = await db.run_async(db.get_test, test_id)
     if not test or test["status"] != "active":
         return False
 
     lang = test["lang"]
-    participants = db.get_participants_ranked(test_id)
+    participants = await db.run_async(db.get_participants_ranked, test_id)
     message = format_results(
         lang, test["name"], participants, test["question_count"], interim=True
     )
 
-    started, finished = db.count_participants(test_id)
+    started, finished = await db.run_async(db.count_participants, test_id)
     in_progress = max(started - finished, 0)
     if in_progress > 0:
         message += "\n\n" + t(lang, "interim_in_progress", count=in_progress)
 
     target = chat_id if chat_id is not None else test["creator_id"]
-    for part in split_message(message):
-        await context.bot.send_message(chat_id=target, text=part)
+    await _send_parts(context, target, message)
     return True
 
 
@@ -120,7 +148,7 @@ async def _resolve_test_for_creator(
     update: Update, context: ContextTypes.DEFAULT_TYPE, args: list[str] | None
 ) -> int | None:
     user_id = update.effective_user.id
-    lang = db.get_user_lang(user_id)
+    lang = await db.run_async(db.get_user_lang, user_id)
 
     if args:
         try:
@@ -129,7 +157,7 @@ async def _resolve_test_for_creator(
             await update.effective_message.reply_text(t(lang, "no_active_tests"))
             return None
 
-        test = db.get_test(test_id)
+        test = await db.run_async(db.get_test, test_id)
         if not test or test["creator_id"] != user_id:
             await update.effective_message.reply_text(t(lang, "not_test_creator"))
             return None
@@ -138,7 +166,7 @@ async def _resolve_test_for_creator(
             return None
         return test_id
 
-    active = db.get_active_tests_by_creator(user_id)
+    active = await db.run_async(db.get_active_tests_by_creator, user_id)
     if not active:
         await update.effective_message.reply_text(t(lang, "no_active_tests"))
         return None
@@ -151,13 +179,13 @@ async def _resolve_test_for_creator(
 
 async def cmd_progress(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    lang = db.get_user_lang(user_id)
+    lang = await db.run_async(db.get_user_lang, user_id)
 
     await update.message.reply_text(t(lang, "progress_wait"))
 
     test_id = await _resolve_test_for_creator(update, context, context.args)
     if test_id is None and not context.args:
-        active = db.get_active_tests_by_creator(user_id)
+        active = await db.run_async(db.get_active_tests_by_creator, user_id)
         if len(active) > 1:
             buttons = [
                 [InlineKeyboardButton(test["name"], callback_data=f"progress_{test['id']}")]
@@ -188,7 +216,7 @@ async def cmd_progress(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def cmd_results(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    lang = db.get_user_lang(user_id)
+    lang = await db.run_async(db.get_user_lang, user_id)
 
     if context.args:
         try:
@@ -197,7 +225,7 @@ async def cmd_results(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await update.message.reply_text(t(lang, "no_active_tests"))
             return
 
-        test = db.get_test(test_id)
+        test = await db.run_async(db.get_test, test_id)
         if not test or test["creator_id"] != user_id:
             await update.message.reply_text(t(lang, "not_test_creator"))
             return
@@ -222,8 +250,8 @@ async def cmd_results(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await update.message.reply_text(t(lang, "test_already_finished"))
         return
 
-    active = db.get_active_tests_by_creator(user_id)
-    finished = db.get_finished_tests_by_creator(user_id)
+    active = await db.run_async(db.get_active_tests_by_creator, user_id)
+    finished = await db.run_async(db.get_finished_tests_by_creator, user_id)
 
     if not active:
         if finished:
@@ -262,10 +290,10 @@ async def on_progress_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await query.answer()
 
     user_id = update.effective_user.id
-    lang = db.get_user_lang(user_id)
+    lang = await db.run_async(db.get_user_lang, user_id)
     test_id = int(query.data.replace("progress_", ""))
 
-    test = db.get_test(test_id)
+    test = await db.run_async(db.get_test, test_id)
     if not test or test["creator_id"] != user_id:
         await query.edit_message_text(t(lang, "not_test_creator"))
         return
@@ -285,10 +313,10 @@ async def on_results_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await query.answer()
 
     user_id = update.effective_user.id
-    lang = db.get_user_lang(user_id)
+    lang = await db.run_async(db.get_user_lang, user_id)
     test_id = int(query.data.replace("results_now_", ""))
 
-    test = db.get_test(test_id)
+    test = await db.run_async(db.get_test, test_id)
     if not test or test["creator_id"] != user_id:
         await query.edit_message_text(t(lang, "not_test_creator"))
         return

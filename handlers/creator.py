@@ -11,7 +11,8 @@ from config import RESULTS_DELAY_OPTIONS, TIME_OPTIONS
 from handlers.results_cmd import finish_test_and_send_results
 from handlers.taker import start_test_from_link
 from locales import t
-from utils import option_label, test_deep_link
+from question_parser import format_questions_preview, parse_questions_bulk
+from utils import split_message, test_deep_link
 
 
 def _lang_keyboard() -> InlineKeyboardMarkup:
@@ -72,6 +73,10 @@ def _clear_participant_wait(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("awaiting_fio_test_id", None)
 
 
+def _parse_error_text(lang: str, code: str, kwargs: dict) -> str:
+    return t(lang, code, **kwargs) + "\n\n" + t(lang, "enter_questions_bulk")
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if context.args and context.args[0].startswith("test_"):
         await start_test_from_link(update, context)
@@ -121,52 +126,8 @@ async def on_create_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         lang = _lang(context)
         key = data.replace("time_", "")
         context.user_data["time_per_question"] = TIME_OPTIONS[key]
-
-        test_id = await db.run_async(
-            db.create_test,
-            update.effective_user.id,
-            context.user_data["test_name"],
-            lang,
-            context.user_data["question_count"],
-            context.user_data["time_per_question"],
-        )
-        context.user_data["test_id"] = test_id
-        context.user_data["create_step"] = "question_text"
-
-        n = context.user_data["current_q"]
-        total = context.user_data["question_count"]
-        await query.message.reply_text(t(lang, "question_n", n=n, total=total))
-        return
-
-    if data.startswith("correct_"):
-        if step != "correct":
-            return
-        await query.answer()
-        lang = _lang(context)
-        correct_index = int(data.replace("correct_", ""))
-
-        n = context.user_data["current_q"]
-        await db.run_async(
-            db.add_question,
-            context.user_data["test_id"],
-            n,
-            context.user_data["current_question_text"],
-            context.user_data["current_options"],
-            correct_index,
-        )
-
-        total = context.user_data["question_count"]
-        if n < total:
-            context.user_data["current_q"] = n + 1
-            context.user_data["create_step"] = "question_text"
-            await query.message.reply_text(t(lang, "question_n", n=n + 1, total=total))
-            return
-
-        context.user_data["create_step"] = "results_delay"
-        await query.message.reply_text(
-            t(lang, "choose_results_delay"),
-            reply_markup=_delay_keyboard(lang),
-        )
+        context.user_data["create_step"] = "questions_bulk"
+        await query.message.reply_text(t(lang, "enter_questions_bulk"))
         return
 
     if data.startswith("delay_"):
@@ -209,7 +170,7 @@ async def on_create_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def on_create_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     step = context.user_data.get("create_step")
-    if step not in ("test_name", "question_count", "question_text", "question_options"):
+    if step not in ("test_name", "questions_bulk"):
         return
 
     lang = _lang(context)
@@ -220,21 +181,6 @@ async def on_create_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await update.message.reply_text(t(lang, "enter_test_name"))
             raise ApplicationHandlerStop
         context.user_data["test_name"] = text
-        context.user_data["create_step"] = "question_count"
-        await update.message.reply_text(t(lang, "enter_question_count"))
-        raise ApplicationHandlerStop
-
-    if step == "question_count":
-        try:
-            count = int(text)
-            if count < 1:
-                raise ValueError
-        except ValueError:
-            await update.message.reply_text(t(lang, "invalid_number"))
-            raise ApplicationHandlerStop
-
-        context.user_data["question_count"] = count
-        context.user_data["current_q"] = 1
         context.user_data["create_step"] = "time"
         await update.message.reply_text(
             t(lang, "choose_time"),
@@ -242,34 +188,48 @@ async def on_create_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         raise ApplicationHandlerStop
 
-    if step == "question_text":
-        if not text:
-            n = context.user_data["current_q"]
-            total = context.user_data["question_count"]
-            await update.message.reply_text(t(lang, "question_n", n=n, total=total))
+    if step == "questions_bulk":
+        result = parse_questions_bulk(text)
+        if result.error:
+            await update.message.reply_text(
+                _parse_error_text(lang, result.error.code, result.error.kwargs)
+            )
             raise ApplicationHandlerStop
 
-        context.user_data["current_question_text"] = text
-        context.user_data["create_step"] = "question_options"
-        await update.message.reply_text(t(lang, "enter_options"))
-        raise ApplicationHandlerStop
-
-    if step == "question_options":
-        options = [line.strip() for line in text.split("\n") if line.strip()]
-        if len(options) < 2:
-            await update.message.reply_text(t(lang, "min_options"))
+        questions = result.questions
+        try:
+            test_id = await db.run_async(
+                db.create_test,
+                update.effective_user.id,
+                context.user_data["test_name"],
+                lang,
+                len(questions),
+                context.user_data.get("time_per_question"),
+            )
+            for q in questions:
+                await db.run_async(
+                    db.add_question,
+                    test_id,
+                    q.number,
+                    q.text,
+                    q.options,
+                    q.correct_index,
+                )
+        except Exception:
+            await update.message.reply_text(t(lang, "questions_save_error"))
             raise ApplicationHandlerStop
 
-        context.user_data["current_options"] = options
-        context.user_data["create_step"] = "correct"
-        options_text = "\n".join(f"{option_label(i)}. {opt}" for i, opt in enumerate(options))
-        buttons = [
-            [InlineKeyboardButton(option_label(i), callback_data=f"correct_{i}")]
-            for i in range(len(options))
-        ]
+        context.user_data["test_id"] = test_id
+        context.user_data["question_count"] = len(questions)
+        context.user_data["create_step"] = "results_delay"
+
+        preview = format_questions_preview(questions)
+        accepted = t(lang, "questions_accepted", count=len(questions))
+        for part in split_message(f"{accepted}\n\n{preview}"):
+            await update.message.reply_text(part)
         await update.message.reply_text(
-            f"{t(lang, 'choose_correct')}\n\n{options_text}",
-            reply_markup=InlineKeyboardMarkup(buttons),
+            t(lang, "choose_results_delay"),
+            reply_markup=_delay_keyboard(lang),
         )
         raise ApplicationHandlerStop
 
@@ -282,5 +242,5 @@ def build_creator_handlers() -> list:
     return [
         CommandHandler("start", cmd_start),
         CommandHandler("cancel", cmd_cancel),
-        CallbackQueryHandler(on_create_callback, pattern="^(lang_|time_|correct_|delay_)"),
+        CallbackQueryHandler(on_create_callback, pattern="^(lang_|time_|delay_)"),
     ]

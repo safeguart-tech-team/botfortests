@@ -6,9 +6,7 @@ from telegram.ext import ApplicationHandlerStop, ContextTypes, MessageHandler, f
 from handlers.creator import on_create_message
 from handlers.taker import on_fio_message
 
-CREATE_TEXT_STEPS = frozenset(
-    {"test_name", "question_count", "question_text", "question_options"}
-)
+CREATE_TEXT_STEPS = frozenset({"test_name", "questions_bulk"})
 
 
 async def on_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

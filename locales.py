@@ -5,17 +5,34 @@ TEXTS = {
         "lang_uz": "🇺🇿 O'zbek",
         "welcome": "Добро пожаловать! Я помогу создать тест для вашего канала.\n\nНажмите /start чтобы начать.",
         "enter_test_name": "Введите название теста:",
-        "enter_question_count": "Сколько вопросов будет в тесте? (введите число):",
+        "enter_questions_bulk": (
+            "Отправьте все вопросы одним сообщением в формате:\n\n"
+            "1. Текст вопроса\n"
+            "A. вариант\n"
+            "B. вариант\n"
+            "+C. правильный вариант\n\n"
+            "2. Следующий вопрос\n"
+            "+A. правильный\n"
+            "B. другой\n\n"
+            "Правильный ответ отметьте знаком + перед буквой (+A. …).\n"
+            "Минимум 2 варианта на вопрос."
+        ),
+        "questions_accepted": "✅ Принято вопросов: {count}. Проверьте:",
+        "questions_empty": "Не удалось найти вопросы. Проверьте формат.",
+        "questions_bad_format": "Сообщение должно начинаться с номера вопроса, например: 1. Текст",
+        "questions_bad_line": "Вопрос {n}: непонятная строка «{line}».",
+        "question_empty_text": "Вопрос {n}: пустой текст вопроса.",
+        "question_min_options": "Вопрос {n}: нужно минимум 2 варианта (сейчас {count}).",
+        "question_no_correct": "Вопрос {n}: отметьте правильный ответ знаком +, например: +A. ответ",
+        "question_many_correct": "Вопрос {n}: отмечен больше одного правильного ответа (+).",
+        "option_empty": "Вопрос {n}: пустой вариант ответа.",
+        "questions_save_error": "Не удалось сохранить вопросы. Попробуйте ещё раз или /cancel.",
         "invalid_number": "Пожалуйста, введите целое число больше 0.",
         "choose_time": "Выберите время на каждый вопрос:",
         "time_none": "Без ограничения",
         "time_10": "10 сек",
         "time_15": "15 сек",
         "time_20": "20 сек",
-        "question_n": "Вопрос {n} из {total}.\n\nВведите текст вопроса:",
-        "enter_options": "Введите варианты ответа (каждый с новой строки, минимум 2):",
-        "min_options": "Нужно минимум 2 варианта ответа. Попробуйте снова:",
-        "choose_correct": "Выберите номер правильного ответа:",
         "choose_results_delay": "Когда отправить результаты?",
         "delay_manual": "Без таймера (/results)",
         "delay_10m": "10 минут",
@@ -79,17 +96,34 @@ TEXTS = {
         "lang_uz": "🇺🇿 O'zbek",
         "welcome": "Xush kelibsiz! Kanalingiz uchun test yaratishga yordam beraman.\n\nBoshlash uchun /start bosing.",
         "enter_test_name": "Test nomini kiriting:",
-        "enter_question_count": "Testda nechta savol bo'ladi? (raqam kiriting):",
+        "enter_questions_bulk": (
+            "Barcha savollarni bitta xabarda yuboring:\n\n"
+            "1. Savol matni\n"
+            "A. variant\n"
+            "B. variant\n"
+            "+C. to'g'ri variant\n\n"
+            "2. Keyingi savol\n"
+            "+A. to'g'ri\n"
+            "B. boshqa\n\n"
+            "To'g'ri javobni harf oldidan + bilan belgilang (+A. …).\n"
+            "Har bir savolda kamida 2 ta variant."
+        ),
+        "questions_accepted": "✅ Qabul qilingan savollar: {count}. Tekshiring:",
+        "questions_empty": "Savollar topilmadi. Formatni tekshiring.",
+        "questions_bad_format": "Xabar savol raqami bilan boshlanishi kerak, masalan: 1. Matn",
+        "questions_bad_line": "Savol {n}: tushunarsiz qator «{line}».",
+        "question_empty_text": "Savol {n}: savol matni bo'sh.",
+        "question_min_options": "Savol {n}: kamida 2 ta variant kerak (hozir {count}).",
+        "question_no_correct": "Savol {n}: to'g'ri javobni + bilan belgilang, masalan: +A. javob",
+        "question_many_correct": "Savol {n}: bir nechta to'g'ri javob (+) belgilangan.",
+        "option_empty": "Savol {n}: javob varianti bo'sh.",
+        "questions_save_error": "Savollarni saqlab bo'lmadi. Qayta urinib ko'ring yoki /cancel.",
         "invalid_number": "Iltimos, 0 dan katta butun son kiriting.",
         "choose_time": "Har bir savol uchun vaqtni tanlang:",
         "time_none": "Cheklovsiz",
         "time_10": "10 son",
         "time_15": "15 son",
         "time_20": "20 son",
-        "question_n": "Savol {n} / {total}.\n\nSavol matnini kiriting:",
-        "enter_options": "Javob variantlarini kiriting (har biri yangi qatorda, kamida 2 ta):",
-        "min_options": "Kamida 2 ta javob varianti kerak. Qayta urinib ko'ring:",
-        "choose_correct": "To'g'ri javob raqamini tanlang:",
         "choose_results_delay": "Natijalar qachon yuborilsin?",
         "delay_manual": "Vaqt yo'q (/results)",
         "delay_10m": "10 daqiqa",

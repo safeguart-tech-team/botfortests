@@ -436,7 +436,7 @@ def _should_refresh_timer(remaining: int) -> bool:
     """Редкие обновления таймера — критично при 100+ одновременных пользователях."""
     if remaining <= 3:
         return True
-    return remaining in (15, 10, 5)
+    return remaining in (30, 20, 15, 10, 5)
 
 
 async def _countdown_and_timeout(

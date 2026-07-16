@@ -37,7 +37,10 @@ def _time_keyboard(lang: str) -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(t(lang, "time_10"), callback_data="time_10"),
                 InlineKeyboardButton(t(lang, "time_15"), callback_data="time_15"),
+            ],
+            [
                 InlineKeyboardButton(t(lang, "time_20"), callback_data="time_20"),
+                InlineKeyboardButton(t(lang, "time_30"), callback_data="time_30"),
             ],
         ]
     )

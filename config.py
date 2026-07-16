@@ -60,6 +60,7 @@ TIME_OPTIONS = {
     "10": 10,
     "15": 15,
     "20": 20,
+    "30": 30,
 }
 
 RESULTS_DELAY_OPTIONS = {

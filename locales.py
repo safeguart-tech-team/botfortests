@@ -6,7 +6,7 @@ TEXTS = {
         "welcome": "Добро пожаловать! Я помогу создать тест для вашего канала.\n\nНажмите /start чтобы начать.",
         "enter_test_name": "Введите название теста:",
         "enter_questions_bulk": (
-            "Отправьте все вопросы одним сообщением в формате:\n\n"
+            "Отправьте вопросы одним или несколькими сообщениями (2–3 и больше) в формате:\n\n"
             "1. Текст вопроса\n"
             "A. вариант\n"
             "B. вариант\n"
@@ -14,8 +14,29 @@ TEXTS = {
             "2. Следующий вопрос\n"
             "+A. правильный\n"
             "B. другой\n\n"
-            "Правильный ответ отметьте знаком + перед буквой (+A. …).\n"
-            "Минимум 2 варианта на вопрос."
+            "Правильный ответ — знак + перед буквой (+A. …).\n"
+            "Когда все куски отправлены — нажмите «Готово» или напишите: готово"
+        ),
+        "btn_questions_done": "✅ Готово — сохранить вопросы",
+        "questions_chunk_ok": (
+            "✅ Кусок принят. Собрано вопросов: {count}.\n"
+            "Можете отправить ещё сообщение или нажмите «Готово»."
+        ),
+        "questions_chunk_ok_partial": (
+            "✅ Кусок принят. Целиком собрано: {count}.\n"
+            "Последний вопрос ещё неполный — дошлите продолжение, затем «Готово»."
+        ),
+        "questions_chunk_partial": (
+            "✅ Кусок принят (вопрос ещё неполный).\n"
+            "Дошлите продолжение, затем нажмите «Готово»."
+        ),
+        "questions_waiting_more": (
+            "Сейчас собрано вопросов: {count}.\n"
+            "Дошлите исправление/продолжение или нажмите «Готово», когда всё готово."
+        ),
+        "questions_continue_hint": (
+            "Исправьте и отправьте этот кусок снова.\n"
+            "Уже принятые сообщения сохранены."
         ),
         "questions_accepted": "✅ Принято вопросов: {count}. Проверьте:",
         "questions_empty": "Не удалось найти вопросы. Проверьте формат.",
@@ -97,7 +118,7 @@ TEXTS = {
         "welcome": "Xush kelibsiz! Kanalingiz uchun test yaratishga yordam beraman.\n\nBoshlash uchun /start bosing.",
         "enter_test_name": "Test nomini kiriting:",
         "enter_questions_bulk": (
-            "Barcha savollarni bitta xabarda yuboring:\n\n"
+            "Savollarni bitta yoki bir nechta xabarda (2–3 va undan ko'p) yuboring:\n\n"
             "1. Savol matni\n"
             "A. variant\n"
             "B. variant\n"
@@ -105,8 +126,29 @@ TEXTS = {
             "2. Keyingi savol\n"
             "+A. to'g'ri\n"
             "B. boshqa\n\n"
-            "To'g'ri javobni harf oldidan + bilan belgilang (+A. …).\n"
-            "Har bir savolda kamida 2 ta variant."
+            "To'g'ri javob — harf oldidan + (+A. …).\n"
+            "Hammasi yuborilgach «Tayyor» tugmasini bosing yoki yozing: tayyor"
+        ),
+        "btn_questions_done": "✅ Tayyor — savollarni saqlash",
+        "questions_chunk_ok": (
+            "✅ Qism qabul qilindi. Jami savollar: {count}.\n"
+            "Yana xabar yuborishingiz yoki «Tayyor» bosishingiz mumkin."
+        ),
+        "questions_chunk_ok_partial": (
+            "✅ Qism qabul qilindi. To'liq yig'ilgan: {count}.\n"
+            "Oxirgi savol hali to'liq emas — davomini yuboring, so'ng «Tayyor»."
+        ),
+        "questions_chunk_partial": (
+            "✅ Qism qabul qilindi (savol hali to'liq emas).\n"
+            "Davomini yuboring, so'ng «Tayyor» bosing."
+        ),
+        "questions_waiting_more": (
+            "Hozir yig'ilgan savollar: {count}.\n"
+            "Tuzatish/davom yuboring yoki hammasi tayyor bo'lsa «Tayyor» bosing."
+        ),
+        "questions_continue_hint": (
+            "Shu qismni tuzatib qayta yuboring.\n"
+            "Oldingi qabul qilingan xabarlar saqlanadi."
         ),
         "questions_accepted": "✅ Qabul qilingan savollar: {count}. Tekshiring:",
         "questions_empty": "Savollar topilmadi. Formatni tekshiring.",

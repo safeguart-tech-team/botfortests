@@ -1,4 +1,4 @@
-"""Парсер массовой загрузки вопросов одним сообщением."""
+"""Парсер массовой загрузки вопросов (одно или несколько сообщений)."""
 
 from __future__ import annotations
 
@@ -10,6 +10,19 @@ QUESTION_RE = re.compile(r"^(\d+)\s*[\.\)\:]\s*(.+?)\s*$")
 # +A. текст / +A) текст / A. текст / +С. текст (кириллица)
 OPTION_RE = re.compile(
     r"^(\+)?\s*([A-Za-zА-Яа-яЁё])\s*[\.\)\:]\s*(.+?)\s*$"
+)
+
+DONE_WORDS = frozenset(
+    {
+        "готово",
+        "готов",
+        "done",
+        "ready",
+        "tayyor",
+        "tayyor.",
+        "/done",
+        "/готово",
+    }
 )
 
 
@@ -31,9 +44,18 @@ class ParseError:
 class ParseResult:
     questions: list[ParsedQuestion]
     error: ParseError | None = None
+    trailing_incomplete: bool = False
 
 
-def parse_questions_bulk(raw: str) -> ParseResult:
+def is_done_message(text: str) -> bool:
+    return (text or "").strip().lower() in DONE_WORDS
+
+
+def parse_questions_bulk(
+    raw: str,
+    *,
+    allow_incomplete_last: bool = False,
+) -> ParseResult:
     """
     Формат:
       1. Вопрос
@@ -44,6 +66,9 @@ def parse_questions_bulk(raw: str) -> ParseResult:
       2. Следующий вопрос
       +A. верный
       B. нет
+
+    allow_incomplete_last — для промежуточных кусков из 2–3 сообщений:
+    незавершённый последний вопрос не считается ошибкой.
     """
     text = (raw or "").strip()
     if not text:
@@ -55,13 +80,31 @@ def parse_questions_bulk(raw: str) -> ParseResult:
     current_text_parts: list[str] = []
     current_options: list[str] = []
     correct_index: int | None = None
+    discarded_incomplete = False
 
-    def flush() -> ParseError | None:
+    def reset_current() -> None:
         nonlocal current_num, current_text_parts, current_options, correct_index
+        current_num = None
+        current_text_parts = []
+        current_options = []
+        correct_index = None
+
+    def flush(*, allow_incomplete: bool = False) -> ParseError | None:
+        nonlocal discarded_incomplete
         if current_num is None:
             return None
 
         q_text = "\n".join(p for p in current_text_parts if p.strip()).strip()
+        incomplete = (
+            not q_text
+            or len(current_options) < 2
+            or correct_index is None
+        )
+        if incomplete and allow_incomplete:
+            discarded_incomplete = True
+            reset_current()
+            return None
+
         if not q_text:
             return ParseError("question_empty_text", {"n": current_num})
         if len(current_options) < 2:
@@ -80,10 +123,7 @@ def parse_questions_bulk(raw: str) -> ParseResult:
                 correct_index=correct_index,
             )
         )
-        current_num = None
-        current_text_parts = []
-        current_options = []
-        correct_index = None
+        reset_current()
         return None
 
     for raw_line in lines:
@@ -93,7 +133,7 @@ def parse_questions_bulk(raw: str) -> ParseResult:
 
         q_match = QUESTION_RE.match(line)
         if q_match:
-            err = flush()
+            err = flush(allow_incomplete=False)
             if err:
                 return ParseResult([], err)
             current_num = int(q_match.group(1))
@@ -110,7 +150,6 @@ def parse_questions_bulk(raw: str) -> ParseResult:
                 return ParseResult(
                     [], ParseError("option_empty", {"n": current_num})
                 )
-            # «+» в конце текста варианта на всякий случай не считаем
             if is_correct:
                 if correct_index is not None:
                     return ParseResult(
@@ -134,18 +173,19 @@ def parse_questions_bulk(raw: str) -> ParseResult:
             ParseError("questions_bad_line", {"n": current_num, "line": line[:80]}),
         )
 
-    err = flush()
+    err = flush(allow_incomplete=allow_incomplete_last)
     if err:
         return ParseResult([], err)
 
     if not questions:
+        if allow_incomplete_last and discarded_incomplete:
+            return ParseResult([], trailing_incomplete=True)
         return ParseResult([], ParseError("questions_empty", {}))
 
-    # Перенумеруем по порядку в сообщении (1..N)
     for i, q in enumerate(questions, start=1):
         q.number = i
 
-    return ParseResult(questions)
+    return ParseResult(questions, trailing_incomplete=discarded_incomplete)
 
 
 def format_questions_preview(questions: list[ParsedQuestion], *, limit: int = 12) -> str:

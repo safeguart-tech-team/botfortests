@@ -285,6 +285,39 @@ async def cmd_results(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 
+async def cmd_reopen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    lang = await db.run_async(db.get_user_lang, user_id)
+
+    if not context.args:
+        await update.message.reply_text(t(lang, "reopen_usage"))
+        return
+
+    try:
+        test_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text(t(lang, "reopen_usage"))
+        return
+
+    test = await db.run_async(db.get_test, test_id)
+    if not test or test["creator_id"] != user_id:
+        await update.message.reply_text(t(lang, "not_test_creator"))
+        return
+
+    if test["status"] == "active":
+        await update.message.reply_text(t(lang, "reopen_already_active", name=test["name"]))
+        return
+
+    try:
+        await db.run_async(db.reopen_test, test_id)
+    except Exception:
+        logger.exception("Failed /reopen for test %s", test_id)
+        await update.message.reply_text(t(lang, "reopen_error"))
+        return
+
+    await update.message.reply_text(t(lang, "reopen_done", name=test["name"], id=test_id))
+
+
 async def on_progress_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -347,6 +380,7 @@ def build_results_handlers():
     return [
         CommandHandler("progress", cmd_progress),
         CommandHandler("results", cmd_results),
+        CommandHandler("reopen", cmd_reopen),
         CallbackQueryHandler(on_progress_pick, pattern="^progress_"),
         CallbackQueryHandler(on_results_now, pattern="^results_now_"),
     ]

@@ -114,6 +114,10 @@ TEXTS = {
         "test_already_finished": "Этот тест уже завершён.",
         "test_not_active": "Этот тест не активен (уже завершён или не найден).",
         "not_test_creator": "Вы не являетесь создателем этого теста.",
+        "reopen_usage": "Чтобы возобновить закрытый тест, напишите: /reopen ID\nНапример: /reopen 15",
+        "reopen_done": "✅ Тест «{name}» снова открыт.\n\nСсылка прежняя: https://t.me/Testlaruz1Bot?start=test_{id}\n\nАвто-таймер результатов отключён. Для финала снова напишите /results.",
+        "reopen_already_active": "Тест «{name}» уже активен.",
+        "reopen_error": "Не удалось возобновить тест. Попробуйте ещё раз через минуту.",
     },
     "uz": {
         "choose_lang": "Tilni tanlang / Выберите язык:",
@@ -230,6 +234,10 @@ TEXTS = {
         "test_already_finished": "Bu test allaqachon tugagan.",
         "test_not_active": "Bu test faol emas (tugagan yoki topilmagan).",
         "not_test_creator": "Siz bu testning yaratuvchisi emassiz.",
+        "reopen_usage": "Yopilgan testni qayta ochish uchun yozing: /reopen ID\nMasalan: /reopen 15",
+        "reopen_done": "✅ «{name}» testi qayta ochildi.\n\nHavola avvalgidek: https://t.me/Testlaruz1Bot?start=test_{id}\n\nNatijalar avto-taymeri o'chirildi. Yakunlash uchun yana /results yozing.",
+        "reopen_already_active": "«{name}» testi allaqachon faol.",
+        "reopen_error": "Testni qayta ochib bo'lmadi. Bir daqiqadan keyin qayta urinib ko'ring.",
     },
 }
 

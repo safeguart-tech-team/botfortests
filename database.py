@@ -258,6 +258,19 @@ def activate_test(test_id: int) -> None:
         )
 
 
+def reopen_test(test_id: int) -> None:
+    """Открывает завершённый тест заново, без авто-закрытия по старому таймеру."""
+    with get_conn() as conn:
+        conn.execute(
+            """
+            UPDATE tests
+            SET status = 'active', link_issued_at = ?, results_delay_sec = 0
+            WHERE id = ?
+            """,
+            (_utcnow(), test_id),
+        )
+
+
 def finish_test(test_id: int) -> None:
     with get_conn() as conn:
         conn.execute(
